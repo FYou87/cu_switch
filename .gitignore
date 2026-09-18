@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+data/
+.DS_Store
+node_modules/
+.next/
+build/
+dist/
+packaging/Witch.exe
+*.spec.bak
