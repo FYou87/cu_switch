@@ -1,0 +1,1041 @@
+from __future__ import annotations
+
+import json
+from typing import Callable
+
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from witch.paths import gateway_base_url
+from witch.parse_import import parse_relay_text
+from witch.presets import ICON_COLORS, PRESETS
+from witch.store import (
+    activate_provider,
+    create_provider,
+    duplicate_provider,
+    export_backup,
+    get_active,
+    import_backup,
+    move_provider,
+    patch_provider,
+    patch_setup,
+    read_store,
+    remove_provider,
+    restore_demo,
+    record_last_test,
+    rotate_token,
+    to_public,
+)
+from witch.test_provider import test_provider as run_test
+
+
+def _line_icon(kind: str, color: str = "#6b7280") -> QIcon:
+    pix = QPixmap(36, 36)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.scale(2, 2)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.6)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    if kind == "edit":
+        painter.drawLine(4, 13, 13, 4)
+        painter.drawLine(13, 4, 15, 6)
+        painter.drawLine(15, 6, 6, 15)
+        painter.drawLine(4, 13, 3, 16)
+        painter.drawLine(3, 16, 6, 15)
+    elif kind == "copy":
+        painter.drawRoundedRect(6, 3, 9, 10, 1.5, 1.5)
+        painter.drawLine(3, 6, 3, 15)
+        painter.drawLine(3, 15, 12, 15)
+        painter.drawLine(3, 6, 5, 6)
+        painter.drawLine(12, 15, 12, 14)
+    elif kind == "zap":
+        painter.drawPolyline(
+            [
+                QPoint(10, 2),
+                QPoint(6, 9),
+                QPoint(10, 9),
+                QPoint(8, 16),
+                QPoint(14, 8),
+                QPoint(10, 8),
+                QPoint(12, 2),
+            ]
+        )
+    elif kind == "chart":
+        painter.drawLine(4, 15, 4, 9)
+        painter.drawLine(8, 15, 8, 6)
+        painter.drawLine(12, 15, 12, 3)
+        painter.drawLine(3, 15, 15, 15)
+    elif kind == "trash":
+        painter.drawLine(4, 5, 14, 5)
+        painter.drawLine(7, 5, 8, 3)
+        painter.drawLine(10, 3, 11, 5)
+        painter.drawRoundedRect(5, 5, 8, 10, 1, 1)
+        painter.drawLine(8, 8, 8, 12)
+        painter.drawLine(10, 8, 10, 12)
+    elif kind == "gear":
+        painter.drawEllipse(7, 7, 4, 4)
+        painter.drawEllipse(4, 4, 10, 10)
+    elif kind == "plus":
+        painter.drawLine(9, 4, 9, 14)
+        painter.drawLine(4, 9, 14, 9)
+    elif kind == "import":
+        painter.drawLine(9, 3, 9, 11)
+        painter.drawLine(6, 8, 9, 11)
+        painter.drawLine(12, 8, 9, 11)
+        painter.drawLine(4, 14, 14, 14)
+    elif kind == "eye":
+        painter.drawEllipse(4, 6, 10, 6)
+        painter.drawEllipse(7, 7, 4, 4)
+    painter.end()
+    return QIcon(pix)
+
+
+def _logo_pixmap() -> QPixmap:
+    pix = QPixmap(56, 56)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#2563eb"))
+    painter.drawRoundedRect(2, 2, 52, 52, 14, 14)
+    pen = QPen(QColor("#ffffff"))
+    pen.setWidth(4)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.drawLine(16, 22, 40, 22)
+    painter.drawLine(33, 15, 40, 22)
+    painter.drawLine(33, 29, 40, 22)
+    painter.drawLine(16, 36, 40, 36)
+    painter.drawLine(16, 36, 23, 29)
+    painter.drawLine(16, 36, 23, 43)
+    painter.end()
+    return pix
+
+
+def _icon_color(provider: dict) -> str:
+    color = (provider.get("iconColor") or "").strip()
+    if color:
+        return color
+    name = provider.get("name") or ""
+    return ICON_COLORS[sum(ord(char) for char in name) % len(ICON_COLORS)]
+
+
+def _host_text() -> str:
+    return gateway_base_url().replace("http://", "").replace("/v1", "")
+
+
+def _subtitle(provider: dict) -> str:
+    if provider.get("kind") == "demo":
+        return "witch://demo"
+    website = (provider.get("website") or "").strip()
+    base = (provider.get("baseUrl") or "").strip()
+    return website or base or (provider.get("notes") or "").strip() or "未配置"
+
+
+class ElideLabel(QLabel):
+    def __init__(self, text: str = "", color: str = "#111827", parent=None):
+        super().__init__(text, parent)
+        self._color = QColor(color)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setPen(self._color)
+        painter.setFont(self.font())
+        text = self.fontMetrics().elidedText(self.text(), Qt.ElideMiddle, max(0, self.width()))
+        painter.drawText(self.rect(), int(Qt.AlignLeft | Qt.AlignVCenter), text)
+
+
+class ProxySwitch(QAbstractButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(42, 24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#22c55e" if self.isChecked() else "#d1d5db"))
+        painter.drawRoundedRect(1, 2, 40, 20, 10, 10)
+        painter.setBrush(QColor("#ffffff"))
+        knob = 22 if self.isChecked() else 3
+        painter.drawEllipse(knob, 4, 16, 16)
+        painter.end()
+
+
+class ProviderCard(QFrame):
+    enable = Signal(str)
+    edit = Signal(str)
+    duplicate = Signal(str)
+    test = Signal(str)
+    detail = Signal(str)
+    delete = Signal(str)
+    moved = Signal(str, int)
+
+    def __init__(self, provider: dict, active: bool, parent=None):
+        super().__init__(parent)
+        self.provider_id = provider["id"]
+        self._drag_y: float | None = None
+        self.setObjectName("providerCard")
+        self.setProperty("active", "true" if active else "false")
+        self.setFixedHeight(74)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(12)
+
+        self.grip = QLabel("≡")
+        self.grip.setObjectName("grip")
+        self.grip.setFixedWidth(18)
+        self.grip.setAlignment(Qt.AlignCenter)
+        self.grip.setCursor(Qt.SizeAllCursor)
+        self.grip.installEventFilter(self)
+        row.addWidget(self.grip)
+
+        badge = QLabel((provider.get("name") or "?")[:1].upper())
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setFixedSize(36, 36)
+        badge.setStyleSheet(
+            f"background: {_icon_color(provider)}; color: white; border-radius: 10px;"
+            "font-weight: 700; font-size: 15px;"
+        )
+        row.addWidget(badge)
+
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        info.setContentsMargins(0, 4, 0, 4)
+        name = ElideLabel(provider.get("name") or "未命名", "#111827")
+        name.setObjectName("providerName")
+        subtitle = _subtitle(provider)
+        url = ElideLabel(subtitle, "#2563eb" if subtitle.startswith("http") else "#6b7280")
+        url.setObjectName("providerUrl")
+        if subtitle.startswith("http"):
+            url.setCursor(Qt.PointingHandCursor)
+            url.mousePressEvent = lambda event, href=subtitle: QDesktopServices.openUrl(QUrl(href))
+        info.addWidget(name)
+        info.addWidget(url)
+        row.addLayout(info, 1)
+
+        last = provider.get("lastTest") or {}
+        if last.get("ms"):
+            latency = QLabel(f"{last['ms']} ms")
+            latency.setObjectName("metaOk" if last.get("ok") else "metaFail")
+            row.addWidget(latency)
+
+        count = len(provider.get("models") or [])
+        badge_text = QLabel(f"{count} 个模型")
+        badge_text.setObjectName("metaBadge")
+        badge_text.setAlignment(Qt.AlignCenter)
+        row.addWidget(badge_text)
+
+        self.enable_btn = QPushButton("✓  使用中" if active else "启用")
+        self.enable_btn.setObjectName("enableOn" if active else "enableOff")
+        self.enable_btn.setCursor(Qt.PointingHandCursor)
+        self.enable_btn.setFixedHeight(32)
+        self.enable_btn.setMinimumWidth(88 if active else 72)
+        self.enable_btn.setEnabled(not active)
+        self.enable_btn.setFocusPolicy(Qt.NoFocus)
+        self.enable_btn.clicked.connect(lambda: self.enable.emit(self.provider_id))
+        row.addWidget(self.enable_btn)
+
+        self.edit_btn = self._icon_button("edit", "编辑")
+        self.dup_btn = self._icon_button("copy", "复制")
+        self.test_btn = self._icon_button("zap", "测速")
+        self.detail_btn = self._icon_button("chart", "模型")
+        self.del_btn = self._icon_button("trash", "删除", danger=True)
+        self.edit_btn.clicked.connect(lambda: self.edit.emit(self.provider_id))
+        self.dup_btn.clicked.connect(lambda: self.duplicate.emit(self.provider_id))
+        self.test_btn.clicked.connect(lambda: self.test.emit(self.provider_id))
+        self.detail_btn.clicked.connect(lambda: self.detail.emit(self.provider_id))
+        self.del_btn.clicked.connect(lambda: self.delete.emit(self.provider_id))
+        self.del_btn.setEnabled(not active)
+        for button in (self.edit_btn, self.dup_btn, self.test_btn, self.detail_btn, self.del_btn):
+            row.addWidget(button)
+
+    def _icon_button(self, kind: str, tip: str, danger: bool = False) -> QPushButton:
+        button = QPushButton()
+        button.setIcon(_line_icon(kind, "#ef4444" if danger else "#6b7280"))
+        button.setIconSize(QSize(16, 16))
+        button.setToolTip(tip)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setObjectName("cardDanger" if danger else "cardIcon")
+        button.setFixedSize(32, 32)
+        button.setFocusPolicy(Qt.NoFocus)
+        return button
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.grip:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._drag_y = event.globalPosition().y()
+                self.grip.grabMouse()
+                return True
+            if event.type() == QEvent.MouseMove and self._drag_y is not None:
+                delta = event.globalPosition().y() - self._drag_y
+                if abs(delta) >= 40:
+                    direction = 1 if delta > 0 else -1
+                    self._drag_y = None
+                    self.grip.releaseMouse()
+                    self.moved.emit(self.provider_id, direction)
+                return True
+            if event.type() == QEvent.MouseButtonRelease:
+                self._drag_y = None
+                self.grip.releaseMouse()
+                return True
+        return super().eventFilter(obj, event)
+
+
+class ColorDot(QPushButton):
+    def __init__(self, color: str, parent=None):
+        super().__init__(parent)
+        self.color = color
+        self._on = False
+        self.setFixedSize(26, 26)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def set_on(self, on: bool) -> None:
+        self._on = on
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self._on:
+            painter.setPen(QPen(QColor("#111827"), 2))
+        else:
+            painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(self.color))
+        painter.drawEllipse(3, 3, 20, 20)
+        painter.end()
+
+
+def _field_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("formLabel")
+    return label
+
+
+def _models_text(models: list[dict]) -> str:
+    return "\n".join(
+        f"{item.get('cursorName', '')} = {item.get('upstreamId', '')}" for item in models or []
+    )
+
+
+def _parse_models(text: str) -> list[dict]:
+    models = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        left, right = line.split("=", 1) if "=" in line else (line, line)
+        models.append({"cursorName": left.strip(), "upstreamId": right.strip() or left.strip()})
+    return models
+
+
+class ProviderDialog(QDialog):
+    def __init__(self, parent=None, provider: dict | None = None):
+        super().__init__(parent)
+        self.provider = provider
+        self._color = (provider or {}).get("iconColor") or ICON_COLORS[0]
+        self.setWindowTitle("编辑供应商" if provider else "添加供应商")
+        self.resize(760, 560)
+        self.setMinimumWidth(680)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 18)
+        root.setSpacing(14)
+        title = QLabel("编辑供应商" if provider else "添加供应商")
+        title.setObjectName("dialogTitle")
+        root.addWidget(title)
+
+        root.addWidget(_field_label("预设供应商"))
+        self.preset = QComboBox()
+        for item in PRESETS:
+            self.preset.addItem(item["label"], item["id"])
+        root.addWidget(self.preset)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(22)
+        left = QVBoxLayout()
+        left.setSpacing(8)
+        right = QVBoxLayout()
+        right.setSpacing(8)
+
+        left.addWidget(_field_label("供应商名称"))
+        self.name = QLineEdit((provider or {}).get("name") or "")
+        self.name.setPlaceholderText("例如 Packy、公司网关")
+        left.addWidget(self.name)
+
+        left.addWidget(_field_label("备注"))
+        self.notes = QLineEdit((provider or {}).get("notes") or "")
+        self.notes.setPlaceholderText("可选")
+        left.addWidget(self.notes)
+
+        left.addWidget(_field_label("官网链接"))
+        self.website = QLineEdit((provider or {}).get("website") or "")
+        self.website.setPlaceholderText("https://")
+        left.addWidget(self.website)
+
+        left.addWidget(_field_label("API Key"))
+        key_row = QHBoxLayout()
+        key_row.setSpacing(6)
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.Password)
+        self.api_key.setPlaceholderText("已保存，留空则不修改" if provider and provider.get("hasApiKey") else "sk-...")
+        self.eye = QPushButton()
+        self.eye.setIcon(_line_icon("eye"))
+        self.eye.setIconSize(QSize(16, 16))
+        self.eye.setFixedSize(36, 36)
+        self.eye.setObjectName("iconBtn")
+        self.eye.setCursor(Qt.PointingHandCursor)
+        self.eye.setFocusPolicy(Qt.NoFocus)
+        self.eye.clicked.connect(self._toggle_key)
+        key_row.addWidget(self.api_key, 1)
+        key_row.addWidget(self.eye)
+        left.addLayout(key_row)
+
+        left.addWidget(_field_label("请求地址"))
+        self.base_url = QLineEdit(
+            "" if provider and provider.get("kind") == "demo" else (provider or {}).get("baseUrl", "")
+        )
+        self.base_url.setPlaceholderText("https://api.example.com/v1")
+        left.addWidget(self.base_url)
+
+        proto = QHBoxLayout()
+        proto.setSpacing(8)
+        proto_box = QVBoxLayout()
+        proto_box.setSpacing(8)
+        proto_box.addWidget(_field_label("协议"))
+        self.protocol = QComboBox()
+        self.protocol.addItem("OpenAI 兼容", "openai")
+        self.protocol.addItem("Anthropic", "anthropic")
+        if provider:
+            self.protocol.setCurrentIndex(0 if provider.get("protocol") != "anthropic" else 1)
+        proto_box.addWidget(self.protocol)
+        auth_box = QVBoxLayout()
+        auth_box.setSpacing(8)
+        auth_box.addWidget(_field_label("认证"))
+        self.auth = QComboBox()
+        self.auth.addItem("Bearer", "bearer")
+        self.auth.addItem("x-api-key", "x-api-key")
+        self.auth.addItem("两者都带", "both")
+        if provider:
+            self.auth.setCurrentIndex({"bearer": 0, "x-api-key": 1, "both": 2}.get(provider.get("authStyle"), 0))
+        auth_box.addWidget(self.auth)
+        proto.addLayout(proto_box, 1)
+        proto.addLayout(auth_box, 1)
+        left.addLayout(proto)
+        left.addStretch()
+
+        right.addWidget(_field_label("图标颜色"))
+        dots = QHBoxLayout()
+        dots.setSpacing(6)
+        self._dots: list[ColorDot] = []
+        for color in ICON_COLORS:
+            dot = ColorDot(color)
+            dot.clicked.connect(lambda _=False, chosen=color: self._pick_color(chosen))
+            self._dots.append(dot)
+            dots.addWidget(dot)
+        dots.addStretch()
+        right.addLayout(dots)
+        self._pick_color(self._color if self._color in ICON_COLORS else ICON_COLORS[0])
+
+        right.addWidget(_field_label("模型映射"))
+        hint = QLabel("左边是 Cursor 里选的名字，右边是上游模型 ID。不要和 Cursor 内置模型重名。")
+        hint.setObjectName("formHint")
+        hint.setWordWrap(True)
+        right.addWidget(hint)
+        self.models = QPlainTextEdit()
+        self.models.setPlaceholderText("openai-main = gpt-4o")
+        self.models.setPlainText(_models_text((provider or {}).get("models") or []))
+        right.addWidget(self.models, 1)
+
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
+        root.addLayout(columns, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("取消")
+        cancel.setObjectName("ghostText")
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("保存" if provider else "添加")
+        save.setObjectName("primaryBtn")
+        save.setDefault(True)
+        save.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        root.addLayout(buttons)
+
+        self.preset.currentIndexChanged.connect(self._apply_preset)
+
+    def _toggle_key(self) -> None:
+        hidden = self.api_key.echoMode() == QLineEdit.Password
+        self.api_key.setEchoMode(QLineEdit.Normal if hidden else QLineEdit.Password)
+
+    def _pick_color(self, color: str) -> None:
+        self._color = color
+        for dot in self._dots:
+            dot.set_on(dot.color == color)
+
+    def _apply_preset(self, index: int) -> None:
+        preset = PRESETS[index]
+        if preset["id"] == "custom":
+            return
+        self.name.setText(preset["name"])
+        self.website.setText(preset["website"])
+        self.base_url.setText(preset["baseUrl"])
+        self.protocol.setCurrentIndex(0 if preset["protocol"] == "openai" else 1)
+        self.auth.setCurrentIndex({"bearer": 0, "x-api-key": 1, "both": 2}[preset["authStyle"]])
+        self.models.setPlainText(_models_text(preset["models"]))
+        self._pick_color(preset["iconColor"])
+
+    def payload(self) -> dict:
+        data = {
+            "name": self.name.text().strip(),
+            "protocol": self.protocol.currentData(),
+            "authStyle": self.auth.currentData(),
+            "baseUrl": self.base_url.text().strip()
+            or ("witch://demo" if self.provider and self.provider.get("kind") == "demo" else ""),
+            "apiKey": self.api_key.text().strip(),
+            "models": _parse_models(self.models.toPlainText()),
+            "notes": self.notes.text().strip(),
+            "website": self.website.text().strip(),
+            "iconColor": self._color,
+        }
+        if not data["name"]:
+            raise ValueError("名称不能为空")
+        if self.provider is None and not data["baseUrl"]:
+            raise ValueError("请求地址不能为空")
+        if not data["models"]:
+            raise ValueError("至少写一条模型映射")
+        return data
+
+
+class ImportDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("导入供应商")
+        self.resize(520, 420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setSpacing(12)
+        title = QLabel("导入供应商")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+        self.text = QTextEdit()
+        self.text.setPlaceholderText(
+            "OPENAI_BASE_URL=https://...\nOPENAI_API_KEY=sk-...\nmodel=deepseek-chat"
+        )
+        self.preview = QLabel("")
+        self.preview.setObjectName("formHint")
+        self.preview.setWordWrap(True)
+        layout.addWidget(self.text, 1)
+        layout.addWidget(self.preview)
+        self.text.textChanged.connect(self._refresh)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("取消")
+        cancel.setObjectName("ghostText")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("导入")
+        ok.setObjectName("primaryBtn")
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
+        self._parsed = None
+
+    def _refresh(self) -> None:
+        try:
+            self._parsed = parse_relay_text(self.text.toPlainText())
+            models = " ".join(item["cursorName"] for item in self._parsed["models"])
+            self.preview.setText(f"{self._parsed['name']}  ·  {self._parsed['baseUrl']}  ·  {models}")
+        except Exception as error:  # noqa: BLE001
+            self._parsed = None
+            self.preview.setText(str(error))
+
+    def payload(self) -> dict:
+        if not self._parsed:
+            raise ValueError(self.preview.text() or "无法识别")
+        return self._parsed
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent: MainWindow):
+        super().__init__(parent)
+        self.main = parent
+        self.setWindowTitle("设置")
+        self.resize(520, 280)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setSpacing(12)
+        title = QLabel("设置")
+        title.setObjectName("dialogTitle")
+        layout.addWidget(title)
+
+        layout.addWidget(_field_label("Cursor Override Base URL"))
+        url_row = QHBoxLayout()
+        self.url = QLineEdit(gateway_base_url())
+        self.url.setReadOnly(True)
+        copy_url = QPushButton("复制")
+        copy_url.setObjectName("ghostText")
+        copy_url.clicked.connect(self.main.copy_url)
+        url_row.addWidget(self.url, 1)
+        url_row.addWidget(copy_url)
+        layout.addLayout(url_row)
+
+        layout.addWidget(_field_label("API Key"))
+        key_row = QHBoxLayout()
+        self.key = QLineEdit()
+        self.key.setReadOnly(True)
+        self.key.setEchoMode(QLineEdit.Password)
+        copy_key = QPushButton("复制")
+        copy_key.setObjectName("ghostText")
+        copy_key.clicked.connect(self.main.copy_key)
+        rotate = QPushButton("轮换")
+        rotate.setObjectName("ghostText")
+        rotate.clicked.connect(self._rotate)
+        key_row.addWidget(self.key, 1)
+        key_row.addWidget(copy_key)
+        key_row.addWidget(rotate)
+        layout.addLayout(key_row)
+
+        actions = QHBoxLayout()
+        for text, slot in (
+            ("探测", self.main.probe),
+            ("导出", self.main.export_file),
+            ("导入备份", self.main.import_file),
+            ("恢复回显", self.main.restore),
+        ):
+            button = QPushButton(text)
+            button.setObjectName("ghostText")
+            button.clicked.connect(slot)
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        layout.addStretch()
+        close = QPushButton("关闭")
+        close.setObjectName("primaryBtn")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(close)
+        layout.addLayout(row)
+        self.reload()
+
+    def reload(self) -> None:
+        self.url.setText(gateway_base_url())
+        self.key.setText(to_public(read_store())["gatewayToken"])
+
+    def _rotate(self) -> None:
+        if QMessageBox.question(self, "轮换", "Cursor 里填的 Key 也要一起改。") != QMessageBox.Yes:
+            return
+        rotate_token()
+        self.reload()
+        self.main.refresh()
+
+
+class MainWindow(QWidget):
+    def __init__(self, on_change: Callable[[], None] | None = None):
+        super().__init__()
+        self._on_change = on_change
+        self._ready = False
+        self._query = ""
+        self.setObjectName("root")
+        self.setWindowTitle("Witch")
+        self.resize(1080, 680)
+        self.setMinimumSize(920, 520)
+        self._build()
+        self.refresh()
+        self._ready = True
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header_bar = QFrame()
+        header_bar.setObjectName("headerBar")
+        header = QHBoxLayout(header_bar)
+        header.setContentsMargins(16, 12, 16, 12)
+        header.setSpacing(8)
+
+        mark = QLabel()
+        mark.setPixmap(_logo_pixmap().scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        mark.setFixedSize(28, 28)
+        header.addWidget(mark)
+        title = QLabel("Witch")
+        title.setObjectName("appTitle")
+        header.addWidget(title)
+
+        settings_btn = QPushButton()
+        settings_btn.setIcon(_line_icon("gear", "#374151"))
+        settings_btn.setIconSize(QSize(16, 16))
+        settings_btn.setToolTip("设置")
+        settings_btn.setObjectName("iconBtn")
+        settings_btn.setFixedSize(34, 34)
+        settings_btn.setCursor(Qt.PointingHandCursor)
+        settings_btn.setFocusPolicy(Qt.NoFocus)
+        settings_btn.clicked.connect(self.open_settings)
+        header.addWidget(settings_btn)
+
+        self.proxy = ProxySwitch()
+        self.proxy.setToolTip("本地代理")
+        self.proxy.toggled.connect(self._toggle_proxy)
+        header.addWidget(self.proxy)
+
+        self.host_chip = QPushButton(_host_text())
+        self.host_chip.setObjectName("hostChip")
+        self.host_chip.setCursor(Qt.PointingHandCursor)
+        self.host_chip.setFocusPolicy(Qt.NoFocus)
+        self.host_chip.setToolTip("点击复制 Base URL，填进 Cursor 的 Override OpenAI Base URL")
+        self.host_chip.clicked.connect(self.copy_url)
+        header.addWidget(self.host_chip)
+        header.addStretch()
+
+        self.app_btn = QPushButton("Cursor")
+        self.app_btn.setObjectName("appSwitch")
+        self.app_btn.setCursor(Qt.PointingHandCursor)
+        self.app_btn.setFocusPolicy(Qt.NoFocus)
+        app_menu = QMenu(self.app_btn)
+        current = app_menu.addAction("Cursor")
+        current.setCheckable(True)
+        current.setChecked(True)
+        self.app_btn.setMenu(app_menu)
+        header.addWidget(self.app_btn)
+
+        for text, slot, tip in (
+            ("导入", self.import_text, "粘贴中转站配置"),
+            ("备份", self.export_file, "导出供应商"),
+            ("探测", self.probe, "用当前供应商打一条请求"),
+        ):
+            button = QPushButton(text)
+            button.setObjectName("toolBtn")
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            header.addWidget(button)
+
+        add_btn = QPushButton()
+        add_btn.setIcon(_line_icon("plus", "#ffffff"))
+        add_btn.setIconSize(QSize(16, 16))
+        add_btn.setObjectName("addBtn")
+        add_btn.setToolTip("添加供应商")
+        add_btn.setFixedSize(36, 36)
+        add_btn.setCursor(Qt.PointingHandCursor)
+        add_btn.setFocusPolicy(Qt.NoFocus)
+        add_btn.clicked.connect(self.add_provider)
+        header.addWidget(add_btn)
+        root.addWidget(header_bar)
+
+        self.search_row = QFrame()
+        self.search_row.setObjectName("searchRow")
+        search_layout = QHBoxLayout(self.search_row)
+        search_layout.setContentsMargins(16, 0, 16, 10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索名称、备注、地址")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._on_search)
+        search_layout.addWidget(self.search)
+        self.search_row.hide()
+        root.addWidget(self.search_row)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("providerScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_host = QWidget()
+        self.list_host.setObjectName("listHost")
+        self.list_layout = QVBoxLayout(self.list_host)
+        self.list_layout.setContentsMargins(16, 14, 16, 16)
+        self.list_layout.setSpacing(10)
+        self.list_layout.addStretch()
+        self.scroll.setWidget(self.list_host)
+        root.addWidget(self.scroll, 1)
+
+        QShortcut(QKeySequence.Preferences, self, self.open_settings)
+        QShortcut(QKeySequence("Ctrl+N"), self, self.add_provider)
+        QShortcut(QKeySequence("Ctrl+I"), self, self.import_text)
+        QShortcut(QKeySequence.Find, self, self._open_search)
+        QShortcut(QKeySequence(Qt.Key_Escape), self, self._close_search)
+
+    def _open_search(self) -> None:
+        self.search_row.show()
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def _close_search(self) -> None:
+        if not self.search_row.isVisible():
+            return
+        self.search.clear()
+        self.search_row.hide()
+
+    def _on_search(self, text: str) -> None:
+        self._query = text.strip().lower()
+        self.refresh()
+
+    def _matches(self, provider: dict) -> bool:
+        if not self._query:
+            return True
+        blob = " ".join(
+            [
+                provider.get("name") or "",
+                provider.get("notes") or "",
+                provider.get("baseUrl") or "",
+                provider.get("website") or "",
+            ]
+        ).lower()
+        return self._query in blob
+
+    def set_gateway_status(self, ok: bool, detail: str) -> None:
+        self.proxy.blockSignals(True)
+        self.proxy.setChecked(ok)
+        self.proxy.blockSignals(False)
+        self.proxy.setToolTip(detail)
+        self.host_chip.setText(_host_text() if ok else "代理已停止")
+        self.host_chip.setProperty("ok", "true" if ok else "false")
+        self.host_chip.style().unpolish(self.host_chip)
+        self.host_chip.style().polish(self.host_chip)
+
+    def _toggle_proxy(self, on: bool) -> None:
+        from witch.gateway import start_gateway, stop_gateway
+
+        if on:
+            try:
+                start_gateway()
+            except RuntimeError as error:
+                self.set_gateway_status(False, str(error))
+                QMessageBox.warning(self, "本地代理", str(error))
+                return
+            self.set_gateway_status(True, gateway_base_url())
+            return
+        stop_gateway()
+        self.set_gateway_status(False, "本地代理已停止")
+
+    def refresh(self) -> None:
+        state = to_public(read_store())
+        bar = self.scroll.verticalScrollBar()
+        keep = bar.value()
+        while self.list_layout.count() > 1:
+            item = self.list_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        providers = [item for item in state["providers"] if self._matches(item)]
+        if not providers:
+            empty = QLabel("没有匹配的供应商" if self._query else "还没有供应商")
+            empty.setObjectName("muted")
+            empty.setAlignment(Qt.AlignCenter)
+            self.list_layout.insertWidget(0, empty)
+        else:
+            for index, provider in enumerate(providers):
+                card = ProviderCard(provider, provider["id"] == state["activeProviderId"])
+                card.enable.connect(self.enable_provider)
+                card.edit.connect(self.edit_provider)
+                card.duplicate.connect(self.duplicate_id)
+                card.test.connect(self.test_provider)
+                card.detail.connect(self.show_models)
+                card.delete.connect(self.delete_provider)
+                card.moved.connect(self.move_id)
+                self.list_layout.insertWidget(index, card)
+        bar.setValue(keep)
+        if self._ready and self._on_change:
+            self._on_change()
+
+    def _provider(self, provider_id: str) -> dict | None:
+        state = to_public(read_store())
+        return next((item for item in state["providers"] if item["id"] == provider_id), None)
+
+    def enable_provider(self, provider_id: str) -> None:
+        activate_provider(provider_id)
+        self.refresh()
+
+    def add_provider(self) -> None:
+        dialog = ProviderDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            create_provider(dialog.payload())
+            self.refresh()
+        except Exception as error:  # noqa: BLE001
+            QMessageBox.warning(self, "添加失败", str(error))
+
+    def edit_provider(self, provider_id: str) -> None:
+        provider = self._provider(provider_id)
+        if not provider:
+            return
+        dialog = ProviderDialog(self, provider)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            patch_provider(provider_id, dialog.payload())
+            self.refresh()
+        except Exception as error:  # noqa: BLE001
+            QMessageBox.warning(self, "保存失败", str(error))
+
+    def delete_provider(self, provider_id: str) -> None:
+        provider = self._provider(provider_id)
+        if not provider:
+            return
+        if provider_id == to_public(read_store())["activeProviderId"]:
+            return
+        if QMessageBox.question(self, "删除", f"删除「{provider['name']}」？") != QMessageBox.Yes:
+            return
+        remove_provider(provider_id)
+        self.refresh()
+
+    def duplicate_id(self, provider_id: str) -> None:
+        duplicate_provider(provider_id)
+        self.refresh()
+
+    def move_id(self, provider_id: str, delta: int) -> None:
+        move_provider(provider_id, delta)
+        self.refresh()
+
+    def show_models(self, provider_id: str) -> None:
+        provider = self._provider(provider_id)
+        if not provider:
+            return
+        lines = [
+            f"{item.get('cursorName')}  →  {item.get('upstreamId')}" for item in provider.get("models") or []
+        ]
+        last = provider.get("lastTest") or {}
+        if last:
+            lines.append("")
+            lines.append(last.get("message") or "")
+        QMessageBox.information(self, provider.get("name") or "模型", "\n".join(lines) or "还没有模型")
+
+    def test_provider(self, provider_id: str) -> None:
+        store, _active = get_active()
+        raw = next((item for item in store["providers"] if item["id"] == provider_id), None)
+        if not raw:
+            return
+        result = run_test(raw)
+        record_last_test(provider_id, result)
+        self.refresh()
+        if not result["ok"]:
+            QMessageBox.warning(self, "测速", result["message"])
+
+    def restore(self) -> None:
+        restore_demo()
+        self.refresh()
+
+    def import_text(self) -> None:
+        dialog = ImportDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            create_provider(dialog.payload())
+            self.refresh()
+        except Exception as error:  # noqa: BLE001
+            QMessageBox.warning(self, "导入失败", str(error))
+
+    def export_file(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "导出", "witch-backup.json", "JSON (*.json)")
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(export_backup(), handle, ensure_ascii=False, indent=2)
+
+    def import_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "导入备份", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as handle:
+                import_backup(json.load(handle))
+            self.refresh()
+        except Exception as error:  # noqa: BLE001
+            QMessageBox.warning(self, "导入失败", str(error))
+
+    def copy_url(self) -> None:
+        QGuiApplication.clipboard().setText(gateway_base_url())
+        patch_setup({"copiedBaseUrl": True})
+        if self.proxy.isChecked():
+            self.host_chip.setText("已复制")
+            QTimer.singleShot(900, lambda: self.host_chip.setText(_host_text()))
+
+    def copy_key(self) -> None:
+        QGuiApplication.clipboard().setText(to_public(read_store())["gatewayToken"])
+        patch_setup({"copiedKey": True})
+
+    def open_settings(self) -> None:
+        SettingsDialog(self).exec()
+
+    def probe(self) -> None:
+        import urllib.error
+        import urllib.request
+
+        state = to_public(read_store())
+        active = next((item for item in state["providers"] if item["id"] == state["activeProviderId"]), None)
+        model = ((active or {}).get("models") or [{"cursorName": "witch-echo"}])[0]["cursorName"]
+        payload = json.dumps(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "stream": False,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{gateway_base_url()}/chat/completions",
+            data=payload,
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {state['gatewayToken']}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "ok"
+            patch_setup({"probed": True})
+            self.refresh()
+            QMessageBox.information(self, "探测", str(text)[:400])
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            QMessageBox.warning(self, "探测", detail[:400] or error.reason)
+            self.refresh()
+        except Exception as error:  # noqa: BLE001
+            QMessageBox.warning(self, "探测", str(error))
+            self.refresh()
