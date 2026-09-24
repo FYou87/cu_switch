@@ -44,6 +44,17 @@ _API_COND = re.compile(
     r"^\(([A-Za-z_$][\w$]*)\(\)\|\|[A-Za-z_$][\w$]*\.localMode\)&&!([A-Za-z_$][\w$]*)$"
 )
 _FUNCTION = re.compile(r"function ([A-Za-z_$][\w$]*)\(")
+_AGENT_MARK = "The best way to code with AI"
+_AGENT_TAIL = re.compile(
+    r"\?Tf\((?P<app>[A-Za-z_$][\w$]*),\{alertDialogStackSize:[A-Za-z_$][\w$]*,"
+    r"isPrivateInferenceHardStopActive:[A-Za-z_$][\w$]*,"
+    r"isWindowFullScreen:[A-Za-z_$][\w$]*,"
+    r"renderRootErrorFallback:[A-Za-z_$][\w$]*,"
+    r"useOpaqueSplashBackground:[A-Za-z_$][\w$]*,"
+    r"workspace:[A-Za-z_$][\w$]*,"
+    r"workspaceCollectionService:[A-Za-z_$][\w$]*\}\):Tf\("
+    r"(?P<login>[A-Za-z_$][\w$]*),\{\}\)"
+)
 
 
 class CursorModeError(RuntimeError):
@@ -273,7 +284,7 @@ def transform_source(text: str, enable: bool) -> str:
     text = _transform_submit(text, flag_name, enable)
     if LOGIN_HINT in text:
         text = _transform_visibility(text, flag_name, enable)
-    return text
+    return _transform_agent_root(text, flag_name, enable)
 
 
 def _transform_submit(text: str, flag_name: str, enable: bool) -> str:
@@ -290,6 +301,32 @@ def _transform_submit(text: str, flag_name: str, enable: bool) -> str:
         )
 
     return _SUBMIT.sub(replacer, text)
+
+
+def _transform_agent_root(text: str, flag_name: str, enable: bool) -> str:
+    matches = list(_AGENT_TAIL.finditer(text))
+    if not matches:
+        if _AGENT_MARK in text and "alertDialogStackSize:" in text:
+            raise CursorModeError("这个 Cursor 版本的 Agent 登录页对不上，还不能切 API 模式。")
+        return text
+    if len(matches) != 1:
+        raise CursorModeError("这个 Cursor 版本的 Agent 登录页对不上，还不能切 API 模式。")
+    match = matches[0]
+    head = text[: match.start()]
+    enabled = re.search(
+        rf"\(([A-Za-z_$][\w$]*)\|\|{re.escape(flag_name)}\.localMode\)$",
+        head,
+    )
+    plain = re.search(r"(?<![\w$])([A-Za-z_$][\w$]*)$", head)
+    if enabled:
+        if enable:
+            return text
+        return head[: enabled.start()] + enabled.group(1) + text[match.start() :]
+    if plain:
+        if not enable:
+            return text
+        return head[: plain.start()] + f"({plain.group(1)}||{flag_name}.localMode)" + text[match.start() :]
+    raise CursorModeError("这个 Cursor 版本的 Agent 登录页对不上，还不能切 API 模式。")
 
 
 def _transform_visibility(text: str, flag_name: str, enable: bool) -> str:

@@ -23,6 +23,12 @@ get when(){return e.customBottomBar},get fallback(){return ue(yt,{get when(){ret
 if(!h()){t.cursorAuthenticationService.login(),t.commandService.executeCommand(hR,"general");return}
 """
 
+AGENT_ROOT = """
+var Rl={extensionIsDev:!1,developmentTooling:!1,enableTraceSpanCollection:!0,enableEmbeddingsModelToggle:!1,enableCPPControlTokenToggle:!1,cursorPredictionOptions:!1,localMode:!1};
+children:"The best way to code with AI"
+ye=F?Tf(jsT,{alertDialogStackSize:q,isPrivateInferenceHardStopActive:w,isWindowFullScreen:V,renderRootErrorFallback:ne,useOpaqueSplashBackground:z,workspace:r,workspaceCollectionService:s}):Tf(wHC,{})
+"""
+
 FLAG_ONLY = (
     "var Ns={extensionIsDev:!1,developmentTooling:!1,enableTraceSpanCollection:!0,"
     "enableEmbeddingsModelToggle:!1,enableCPPControlTokenToggle:!1,cursorPredictionOptions:!1,localMode:!1};"
@@ -75,6 +81,12 @@ class CursorModeTests(unittest.TestCase):
         self.assertIn("h()&&!NEb", disabled)
         self.assertNotIn("Gc.localMode", disabled)
         self.assertEqual(transform_source(disabled, True), enabled)
+        agent = transform_source(AGENT_ROOT, True)
+        self.assertIn("(F||Rl.localMode)?Tf(jsT,", agent)
+        self.assertEqual(transform_source(agent, True), agent)
+        self.assertEqual(transform_source(agent, False), AGENT_ROOT)
+        headline_only = FLAG_ONLY + '\nsubtitle:"The best way to code with AI"\n'
+        self.assertNotIn("||", transform_source(headline_only, True))
         flagged = transform_source(FLAG_ONLY, True)
         self.assertIn("localMode:!0", flagged)
         self.assertEqual(transform_source(flagged, False), FLAG_ONLY)
