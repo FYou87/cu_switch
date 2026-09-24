@@ -96,20 +96,28 @@ QPushButton#iconBtn, QPushButton#toolBtn {
 }
 QPushButton#iconBtn { padding: 0; }
 QPushButton#iconBtn:hover, QPushButton#toolBtn:hover { background: #f3f4f6; }
-QPushButton#modeBtn {
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  padding: 6px 12px;
+QFrame#modeTabs {
+  background: #e8eaef;
+  border: none;
+  border-radius: 9px;
+}
+QPushButton#modeTab {
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  padding: 5px 16px;
   font-weight: 650;
+  color: #4b5563;
+}
+QPushButton#modeTab:hover { color: #111827; }
+QPushButton#modeTab[selected="true"] {
+  background: #ffffff;
   color: #111827;
 }
-QPushButton#modeBtn[selected="true"] {
-  background: #2563eb;
-  border: none;
-  color: #ffffff;
+QFrame#providerCard[dragging="true"] {
+  border: 1px solid #2563eb;
+  background: #ffffff;
 }
-QPushButton#modeBtn[selected="true"]:hover { background: #1d4ed8; }
 QPushButton#addBtn {
   background: #2563eb;
   border: none;

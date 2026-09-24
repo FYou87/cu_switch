@@ -7,6 +7,7 @@ from witch.store import (
     create_provider,
     duplicate_provider,
     move_provider,
+    patch_provider,
     read_store,
     reorder_providers,
     to_public,
@@ -74,6 +75,29 @@ class StoreTests(unittest.TestCase):
         duplicate_provider(created["id"])
         names = [item["name"] for item in to_public(read_store())["providers"]]
         self.assertIn("DeepSeek copy", names)
+
+    def test_edit_persists_and_demo_becomes_relay(self):
+        demo = next(item for item in read_store()["providers"] if item["id"] == "demo-echo")
+        patch_provider(
+            demo["id"],
+            {
+                "name": "改过的名字",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKey": "sk-saved",
+                "kind": "relay",
+                "models": [{"cursorName": "relay-a", "upstreamId": "upstream-a"}],
+            },
+        )
+        saved = next(item for item in read_store()["providers"] if item["id"] == "demo-echo")
+        self.assertEqual(saved["name"], "改过的名字")
+        self.assertEqual(saved["baseUrl"], "https://api.example.com/v1")
+        self.assertEqual(saved["apiKey"], "sk-saved")
+        self.assertEqual(saved["kind"], "relay")
+        self.assertEqual(saved["models"][0]["cursorName"], "relay-a")
+        patch_provider(saved["id"], {"name": "只改名字", "apiKey": ""})
+        again = next(item for item in read_store()["providers"] if item["id"] == "demo-echo")
+        self.assertEqual(again["name"], "只改名字")
+        self.assertEqual(again["apiKey"], "sk-saved")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,17 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QPropertyAnimation,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -44,14 +54,12 @@ from witch.store import (
     export_backup,
     get_active,
     import_backup,
-    move_provider,
     patch_provider,
     patch_setup,
     read_store,
     remove_provider,
-    restore_demo,
+    reorder_providers,
     record_last_test,
-    rotate_token,
     to_public,
 )
 from witch.test_provider import test_provider as run_test
@@ -160,7 +168,7 @@ def _host_text() -> str:
 
 def _subtitle(provider: dict) -> str:
     if provider.get("kind") == "demo":
-        return "witch://demo"
+        return "本机回显"
     website = (provider.get("website") or "").strip()
     base = (provider.get("baseUrl") or "").strip()
     return website or base or (provider.get("notes") or "").strip() or "未配置"
@@ -206,14 +214,15 @@ class ProviderCard(QFrame):
     edit = Signal(str)
     duplicate = Signal(str)
     test = Signal(str)
-    detail = Signal(str)
     delete = Signal(str)
-    moved = Signal(str, int)
+    drag_press = Signal(object, float)
+    drag_move = Signal(object, float)
+    drag_release = Signal(object)
 
     def __init__(self, provider: dict, active: bool, parent=None):
         super().__init__(parent)
         self.provider_id = provider["id"]
-        self._drag_y: float | None = None
+        self._pressed = False
         self.setObjectName("providerCard")
         self.setProperty("active", "true" if active else "false")
         self.setFixedHeight(74)
@@ -256,8 +265,9 @@ class ProviderCard(QFrame):
 
         last = provider.get("lastTest") or {}
         if last.get("ms"):
-            latency = QLabel(f"{last['ms']} ms")
+            latency = QLabel(f"{last['ms']} ms" if last.get("ok") else "失败")
             latency.setObjectName("metaOk" if last.get("ok") else "metaFail")
+            latency.setToolTip(last.get("message") or "")
             row.addWidget(latency)
 
         count = len(provider.get("models") or [])
@@ -279,15 +289,13 @@ class ProviderCard(QFrame):
         self.edit_btn = self._icon_button("edit", "编辑")
         self.dup_btn = self._icon_button("copy", "复制")
         self.test_btn = self._icon_button("zap", "测速")
-        self.detail_btn = self._icon_button("chart", "模型")
         self.del_btn = self._icon_button("trash", "删除", danger=True)
         self.edit_btn.clicked.connect(lambda: self.edit.emit(self.provider_id))
         self.dup_btn.clicked.connect(lambda: self.duplicate.emit(self.provider_id))
         self.test_btn.clicked.connect(lambda: self.test.emit(self.provider_id))
-        self.detail_btn.clicked.connect(lambda: self.detail.emit(self.provider_id))
         self.del_btn.clicked.connect(lambda: self.delete.emit(self.provider_id))
         self.del_btn.setEnabled(not active)
-        for button in (self.edit_btn, self.dup_btn, self.test_btn, self.detail_btn, self.del_btn):
+        for button in (self.edit_btn, self.dup_btn, self.test_btn, self.del_btn):
             row.addWidget(button)
 
     def _icon_button(self, kind: str, tip: str, danger: bool = False) -> QPushButton:
@@ -304,22 +312,168 @@ class ProviderCard(QFrame):
     def eventFilter(self, obj, event) -> bool:
         if obj is self.grip:
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-                self._drag_y = event.globalPosition().y()
+                self._pressed = True
                 self.grip.grabMouse()
+                self.drag_press.emit(self, float(event.globalPosition().y()))
                 return True
-            if event.type() == QEvent.MouseMove and self._drag_y is not None:
-                delta = event.globalPosition().y() - self._drag_y
-                if abs(delta) >= 40:
-                    direction = 1 if delta > 0 else -1
-                    self._drag_y = None
-                    self.grip.releaseMouse()
-                    self.moved.emit(self.provider_id, direction)
+            if event.type() == QEvent.MouseMove and self._pressed:
+                self.drag_move.emit(self, float(event.globalPosition().y()))
                 return True
-            if event.type() == QEvent.MouseButtonRelease:
-                self._drag_y = None
+            if event.type() == QEvent.MouseButtonRelease and self._pressed:
+                self._pressed = False
                 self.grip.releaseMouse()
+                self.drag_release.emit(self)
                 return True
         return super().eventFilter(obj, event)
+
+
+class ReorderList(QWidget):
+    reordered = Signal(list)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("listHost")
+        self.cards: list[ProviderCard] = []
+        self._drag: ProviderCard | None = None
+        self._press_global = 0.0
+        self._press_y = 0
+        self._left = 16
+        self._top = 14
+        self._gap = 10
+        self._allow_drag = True
+
+    def set_cards(self, cards: list[ProviderCard], allow_drag: bool) -> None:
+        for card in self.cards:
+            card.setParent(None)
+            card.deleteLater()
+        empty = getattr(self, "_empty", None)
+        if empty is not None:
+            empty.setParent(None)
+            empty.deleteLater()
+            self._empty = None
+        self.cards = cards
+        self._allow_drag = allow_drag
+        self._drag = None
+        for card in cards:
+            card.setParent(self)
+            card.drag_press.connect(self._press)
+            card.drag_move.connect(self._move)
+            card.drag_release.connect(self._release)
+            card.grip.setVisible(allow_drag)
+            card.show()
+        self._fit_width()
+        self._place(animate=False)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_width()
+        empty = getattr(self, "_empty", None)
+        if empty is not None:
+            empty.setGeometry(self._left, 24, max(0, self.width() - self._left * 2), 32)
+        if self._drag is None:
+            self._place(animate=False)
+
+    def _fit_width(self) -> None:
+        width = max(0, self.width() - self._left * 2)
+        for card in self.cards:
+            card.setFixedWidth(width)
+
+    def _press(self, card: ProviderCard, global_y: float) -> None:
+        if not self._allow_drag or card not in self.cards:
+            return
+        self._drag = card
+        self._press_global = global_y
+        self._press_y = card.y()
+        card.setProperty("dragging", "true")
+        card.style().unpolish(card)
+        card.style().polish(card)
+        card.raise_()
+
+    def _move(self, card: ProviderCard, global_y: float) -> None:
+        if self._drag is not card:
+            return
+        y = self._press_y + int(global_y - self._press_global)
+        card.move(self._left, max(self._top, y))
+        card.raise_()
+        self._place(animate=True)
+
+    def _release(self, card: ProviderCard) -> None:
+        if self._drag is not card:
+            return
+        drop = self._drop_index()
+        self.cards = [item for item in self.cards if item is not card]
+        self.cards.insert(drop, card)
+        self._drag = None
+        card.setProperty("dragging", "false")
+        card.style().unpolish(card)
+        card.style().polish(card)
+        self._place(animate=True)
+        self.reordered.emit([item.provider_id for item in self.cards])
+
+    def _drop_index(self) -> int:
+        if self._drag is None:
+            return 0
+        others = [card for card in self.cards if card is not self._drag]
+        center = self._drag.y() + self._drag.height() / 2
+        y = self._top
+        for index, card in enumerate(others):
+            if center < y + card.height() / 2:
+                return index
+            y += card.height() + self._gap
+        return len(others)
+
+    def _targets(self) -> dict[ProviderCard, int]:
+        if self._drag is None:
+            y = self._top
+            found = {}
+            for card in self.cards:
+                found[card] = y
+                y += card.height() + self._gap
+            return found
+        others = [card for card in self.cards if card is not self._drag]
+        drop = self._drop_index()
+        y = self._top
+        found = {}
+        cursor = 0
+        for index in range(len(others) + 1):
+            if index == drop:
+                y += self._drag.height() + self._gap
+                continue
+            card = others[cursor]
+            found[card] = y
+            y += card.height() + self._gap
+            cursor += 1
+        return found
+
+    def _place(self, animate: bool) -> None:
+        targets = self._targets()
+        bottom = self._top
+        for card, y in targets.items():
+            self._move_to(card, y, animate)
+            bottom = max(bottom, y + card.height() + self._gap)
+        if self._drag is not None:
+            bottom = max(bottom, self._drag.y() + self._drag.height() + self._gap)
+        self.setMinimumHeight(max(bottom + 8, 80))
+
+    def _move_to(self, card: ProviderCard, y: int, animate: bool) -> None:
+        target = QPoint(self._left, y)
+        if animate and getattr(card, "_target_y", None) == y:
+            return
+        card._target_y = y
+        running = getattr(card, "_slide", None)
+        if running is not None:
+            running.stop()
+            card._slide = None
+        if not animate or card.pos() == target:
+            card.move(target)
+            return
+        anim = QPropertyAnimation(card, b"pos", card)
+        anim.setDuration(180)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setStartValue(card.pos())
+        anim.setEndValue(target)
+        anim.start()
+        card._slide = anim
 
 
 class ColorDot(QPushButton):
@@ -432,9 +586,10 @@ class ProviderDialog(QDialog):
         left.addLayout(key_row)
 
         left.addWidget(_field_label("请求地址"))
-        self.base_url = QLineEdit(
-            "" if provider and provider.get("kind") == "demo" else (provider or {}).get("baseUrl", "")
-        )
+        shown_url = (provider or {}).get("baseUrl", "")
+        if provider and provider.get("kind") == "demo":
+            shown_url = ""
+        self.base_url = QLineEdit(shown_url)
         self.base_url.setPlaceholderText("https://api.example.com/v1")
         left.addWidget(self.base_url)
 
@@ -499,12 +654,21 @@ class ProviderDialog(QDialog):
         save = QPushButton("保存" if provider else "添加")
         save.setObjectName("primaryBtn")
         save.setDefault(True)
-        save.clicked.connect(self.accept)
+        save.clicked.connect(self._save)
         buttons.addWidget(cancel)
         buttons.addWidget(save)
         root.addLayout(buttons)
 
+        self._payload: dict | None = None
         self.preset.currentIndexChanged.connect(self._apply_preset)
+
+    def _save(self) -> None:
+        try:
+            self._payload = self._build_payload()
+        except ValueError as error:
+            QMessageBox.warning(self, "还没填完", str(error))
+            return
+        self.accept()
 
     def _toggle_key(self) -> None:
         hidden = self.api_key.echoMode() == QLineEdit.Password
@@ -528,21 +692,30 @@ class ProviderDialog(QDialog):
         self._pick_color(preset["iconColor"])
 
     def payload(self) -> dict:
+        if self._payload is None:
+            self._payload = self._build_payload()
+        return self._payload
+
+    def _build_payload(self) -> dict:
         data = {
             "name": self.name.text().strip(),
             "protocol": self.protocol.currentData(),
             "authStyle": self.auth.currentData(),
-            "baseUrl": self.base_url.text().strip()
-            or ("witch://demo" if self.provider and self.provider.get("kind") == "demo" else ""),
+            "baseUrl": self.base_url.text().strip(),
             "apiKey": self.api_key.text().strip(),
             "models": _parse_models(self.models.toPlainText()),
             "notes": self.notes.text().strip(),
             "website": self.website.text().strip(),
             "iconColor": self._color,
         }
+        if self.provider and self.provider.get("kind") == "demo" and not data["baseUrl"]:
+            data["baseUrl"] = "witch://demo"
+            data["kind"] = "demo"
+        elif data["baseUrl"].startswith("http"):
+            data["kind"] = "relay"
         if not data["name"]:
             raise ValueError("名称不能为空")
-        if self.provider is None and not data["baseUrl"]:
+        if not data["baseUrl"]:
             raise ValueError("请求地址不能为空")
         if not data["models"]:
             raise ValueError("至少写一条模型映射")
@@ -598,22 +771,23 @@ class ImportDialog(QDialog):
         return self._parsed
 
 
-class ModeSwitch(QWidget):
+class ModeSwitch(QFrame):
     chosen = Signal(str)
 
     def __init__(self):
         super().__init__()
+        self.setObjectName("modeTabs")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(0)
         self._mode = "login"
         self._buttons: dict[str, QPushButton] = {}
         for mode, label, tip in (
-            ("api", "API", "API 模式：不登录。Agent 和 IDE 都走当前中转站。"),
-            ("login", "登录", "登录模式：恢复原版 Cursor，用账号登录。"),
+            ("api", "API", "不登录。Agent 和 IDE 都走当前中转站。"),
+            ("login", "登录", "恢复原版 Cursor，用账号登录。"),
         ):
             button = QPushButton(label)
-            button.setObjectName("modeBtn")
+            button.setObjectName("modeTab")
             button.setCursor(Qt.PointingHandCursor)
             button.setFocusPolicy(Qt.NoFocus)
             button.setToolTip(tip)
@@ -638,56 +812,28 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.main = parent
         self.setWindowTitle("设置")
-        self.resize(520, 280)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(12)
+        self.resize(420, 180)
         title = QLabel("设置")
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
-        hint = QLabel("顶栏的 API / 登录 会改 Cursor。API 模式不用登录，Agent 和 IDE 都走当前中转站。")
+        hint = QLabel("中转站的地址和 Key 写在供应商卡片里。顶栏的 API / 登录会直接改 Cursor，这里不用再填一把钥匙。")
         hint.setObjectName("formHint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        layout.addWidget(_field_label("Cursor Override Base URL"))
-        url_row = QHBoxLayout()
-        self.url = QLineEdit(gateway_base_url())
-        self.url.setReadOnly(True)
-        copy_url = QPushButton("复制")
-        copy_url.setObjectName("ghostText")
-        copy_url.clicked.connect(self.main.copy_url)
-        url_row.addWidget(self.url, 1)
-        url_row.addWidget(copy_url)
-        layout.addLayout(url_row)
-
-        layout.addWidget(_field_label("API Key"))
-        key_row = QHBoxLayout()
-        self.key = QLineEdit()
-        self.key.setReadOnly(True)
-        self.key.setEchoMode(QLineEdit.Password)
-        copy_key = QPushButton("复制")
-        copy_key.setObjectName("ghostText")
-        copy_key.clicked.connect(self.main.copy_key)
-        rotate = QPushButton("轮换")
-        rotate.setObjectName("ghostText")
-        rotate.clicked.connect(self._rotate)
-        key_row.addWidget(self.key, 1)
-        key_row.addWidget(copy_key)
-        key_row.addWidget(rotate)
-        layout.addLayout(key_row)
-
         actions = QHBoxLayout()
         for text, slot in (
-            ("探测", self.main.probe),
-            ("导出", self.main.export_file),
+            ("导出备份", self.main.export_file),
             ("导入备份", self.main.import_file),
-            ("恢复回显", self.main.restore),
         ):
             button = QPushButton(text)
             button.setObjectName("ghostText")
             button.clicked.connect(slot)
             actions.addWidget(button)
+        actions.addStretch()
         layout.addLayout(actions)
         layout.addStretch()
         close = QPushButton("关闭")
@@ -697,19 +843,6 @@ class SettingsDialog(QDialog):
         row.addStretch()
         row.addWidget(close)
         layout.addLayout(row)
-        self.reload()
-
-    def reload(self) -> None:
-        self.url.setText(gateway_base_url())
-        self.key.setText(to_public(read_store())["gatewayToken"])
-
-    def _rotate(self) -> None:
-        if QMessageBox.question(self, "轮换", "Cursor 里填的 Key 也要一起改。") != QMessageBox.Yes:
-            return
-        rotate_token()
-        self.reload()
-        self.main.refresh()
-        self.main._refresh_api_profile()
 
 
 class MainWindow(QWidget):
@@ -778,7 +911,6 @@ class MainWindow(QWidget):
         for text, slot, tip in (
             ("导入", self.import_text, "粘贴中转站配置"),
             ("备份", self.export_file, "导出供应商"),
-            ("探测", self.probe, "用当前供应商打一条请求"),
         ):
             button = QPushButton(text)
             button.setObjectName("toolBtn")
@@ -817,13 +949,9 @@ class MainWindow(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list_host = QWidget()
-        self.list_host.setObjectName("listHost")
-        self.list_layout = QVBoxLayout(self.list_host)
-        self.list_layout.setContentsMargins(16, 14, 16, 16)
-        self.list_layout.setSpacing(10)
-        self.list_layout.addStretch()
-        self.scroll.setWidget(self.list_host)
+        self.board = ReorderList()
+        self.board.reordered.connect(self._commit_order)
+        self.scroll.setWidget(self.board)
         root.addWidget(self.scroll, 1)
 
         QShortcut(QKeySequence.Preferences, self, self.open_settings)
@@ -893,29 +1021,33 @@ class MainWindow(QWidget):
         state = to_public(read_store())
         bar = self.scroll.verticalScrollBar()
         keep = bar.value()
-        while self.list_layout.count() > 1:
-            item = self.list_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
         providers = [item for item in state["providers"] if self._matches(item)]
-        if not providers:
+        cards = []
+        for provider in providers:
+            card = ProviderCard(provider, provider["id"] == state["activeProviderId"])
+            card.enable.connect(self.enable_provider)
+            card.edit.connect(self.edit_provider)
+            card.duplicate.connect(self.duplicate_id)
+            card.test.connect(self.test_provider)
+            card.delete.connect(self.delete_provider)
+            cards.append(card)
+        self.board.set_cards(cards, allow_drag=not self._query)
+        if not cards:
             empty = QLabel("没有匹配的供应商" if self._query else "还没有供应商")
             empty.setObjectName("muted")
             empty.setAlignment(Qt.AlignCenter)
-            self.list_layout.insertWidget(0, empty)
-        else:
-            for index, provider in enumerate(providers):
-                card = ProviderCard(provider, provider["id"] == state["activeProviderId"])
-                card.enable.connect(self.enable_provider)
-                card.edit.connect(self.edit_provider)
-                card.duplicate.connect(self.duplicate_id)
-                card.test.connect(self.test_provider)
-                card.detail.connect(self.show_models)
-                card.delete.connect(self.delete_provider)
-                card.moved.connect(self.move_id)
-                self.list_layout.insertWidget(index, card)
+            empty.setParent(self.board)
+            empty.setGeometry(16, 24, max(0, self.board.width() - 32), 32)
+            empty.show()
+            self.board._empty = empty
         bar.setValue(keep)
+        if self._ready and self._on_change:
+            self._on_change()
+
+    def _commit_order(self, ids: list[str]) -> None:
+        if self._query:
+            return
+        reorder_providers(ids)
         if self._ready and self._on_change:
             self._on_change()
 
@@ -1009,23 +1141,6 @@ class MainWindow(QWidget):
         duplicate_provider(provider_id)
         self.refresh()
 
-    def move_id(self, provider_id: str, delta: int) -> None:
-        move_provider(provider_id, delta)
-        self.refresh()
-
-    def show_models(self, provider_id: str) -> None:
-        provider = self._provider(provider_id)
-        if not provider:
-            return
-        lines = [
-            f"{item.get('cursorName')}  →  {item.get('upstreamId')}" for item in provider.get("models") or []
-        ]
-        last = provider.get("lastTest") or {}
-        if last:
-            lines.append("")
-            lines.append(last.get("message") or "")
-        QMessageBox.information(self, provider.get("name") or "模型", "\n".join(lines) or "还没有模型")
-
     def test_provider(self, provider_id: str) -> None:
         store, _active = get_active()
         raw = next((item for item in store["providers"] if item["id"] == provider_id), None)
@@ -1033,12 +1148,6 @@ class MainWindow(QWidget):
             return
         result = run_test(raw)
         record_last_test(provider_id, result)
-        self.refresh()
-        if not result["ok"]:
-            QMessageBox.warning(self, "测速", result["message"])
-
-    def restore(self) -> None:
-        restore_demo()
         self.refresh()
 
     def import_text(self) -> None:
@@ -1076,47 +1185,5 @@ class MainWindow(QWidget):
             self.host_chip.setText("已复制")
             QTimer.singleShot(900, lambda: self.host_chip.setText(_host_text()))
 
-    def copy_key(self) -> None:
-        QGuiApplication.clipboard().setText(to_public(read_store())["gatewayToken"])
-        patch_setup({"copiedKey": True})
-
     def open_settings(self) -> None:
         SettingsDialog(self).exec()
-
-    def probe(self) -> None:
-        import urllib.error
-        import urllib.request
-
-        state = to_public(read_store())
-        active = next((item for item in state["providers"] if item["id"] == state["activeProviderId"]), None)
-        model = ((active or {}).get("models") or [{"cursorName": "witch-echo"}])[0]["cursorName"]
-        payload = json.dumps(
-            {
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "stream": False,
-            }
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            f"{gateway_base_url()}/chat/completions",
-            data=payload,
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {state['gatewayToken']}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "ok"
-            patch_setup({"probed": True})
-            self.refresh()
-            QMessageBox.information(self, "探测", str(text)[:400])
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            QMessageBox.warning(self, "探测", detail[:400] or error.reason)
-            self.refresh()
-        except Exception as error:  # noqa: BLE001
-            QMessageBox.warning(self, "探测", str(error))
-            self.refresh()

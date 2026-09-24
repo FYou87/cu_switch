@@ -159,10 +159,10 @@ def patch_provider(provider_id: str, data: dict[str, Any]) -> dict[str, Any]:
     provider = next((item for item in store["providers"] if item["id"] == provider_id), None)
     if not provider:
         raise ValueError("找不到这个中转站")
-    for key in ("name", "protocol", "authStyle", "baseUrl", "notes", "website", "iconColor"):
+    for key in ("name", "protocol", "authStyle", "baseUrl", "notes", "website", "iconColor", "kind"):
         if key in data and data[key] is not None:
             provider[key] = data[key].strip() if isinstance(data[key], str) else data[key]
-    if data.get("apiKey"):
+    if "apiKey" in data and str(data.get("apiKey") or "").strip():
         provider["apiKey"] = str(data["apiKey"]).strip()
     if "models" in data and data["models"] is not None:
         provider["models"] = [
