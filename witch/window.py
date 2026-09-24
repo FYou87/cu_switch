@@ -10,6 +10,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QSize,
     Qt,
+    QThread,
     QTimer,
     QUrl,
     Signal,
@@ -34,8 +35,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -63,6 +65,7 @@ from witch.store import (
     to_public,
 )
 from witch.test_provider import test_provider as run_test
+from witch.upstream import list_model_ids
 
 
 def _line_icon(kind: str, color: str = "#6b7280") -> QIcon:
@@ -507,20 +510,149 @@ def _field_label(text: str) -> QLabel:
     return label
 
 
-def _models_text(models: list[dict]) -> str:
-    return "\n".join(
-        f"{item.get('cursorName', '')} = {item.get('upstreamId', '')}" for item in models or []
-    )
+def _model_ids(models: list[dict] | None) -> list[str]:
+    found: list[str] = []
+    for item in models or []:
+        name = str(item.get("upstreamId") or item.get("cursorName") or "").strip()
+        if name and name not in found:
+            found.append(name)
+    return found
 
 
-def _parse_models(text: str) -> list[dict]:
-    models = []
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        left, right = line.split("=", 1) if "=" in line else (line, line)
-        models.append({"cursorName": left.strip(), "upstreamId": right.strip() or left.strip()})
-    return models
+def _saved_api_key(provider_id: str) -> str:
+    for item in read_store().get("providers") or []:
+        if item.get("id") == provider_id:
+            return str(item.get("apiKey") or "")
+    return ""
+
+
+class ModelFetch(QThread):
+    succeeded = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, base_url: str, api_key: str, auth_style: str, protocol: str):
+        super().__init__()
+        self._base_url = base_url
+        self._api_key = api_key
+        self._auth_style = auth_style
+        self._protocol = protocol
+
+    def run(self) -> None:
+        try:
+            ids = list_model_ids(self._base_url, self._api_key, self._auth_style, self._protocol)
+        except ValueError as error:
+            self.failed.emit(str(error))
+            return
+        except Exception as error:  # noqa: BLE001
+            self.failed.emit(str(error) or "获取失败")
+            return
+        self.succeeded.emit(ids)
+
+
+class ModelPicker(QWidget):
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._catalog: list[str] = []
+        self._chosen: list[str] = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.combo = QComboBox()
+        self.combo.setObjectName("modelCombo")
+        self.combo.activated.connect(self._add_index)
+        layout.addWidget(self.combo)
+        self.selected_list = QListWidget()
+        self.selected_list.setObjectName("selectedModels")
+        self.selected_list.setMinimumHeight(140)
+        layout.addWidget(self.selected_list, 1)
+        self._rebuild()
+
+    def chosen_ids(self) -> list[str]:
+        return list(self._chosen)
+
+    def set_models(self, chosen: list[str], catalog: list[str] | None = None) -> None:
+        self._chosen = []
+        for name in chosen:
+            if name and name not in self._chosen:
+                self._chosen.append(name)
+        base = list(self._chosen if catalog is None else catalog)
+        self._catalog = []
+        for name in base + self._chosen:
+            if name and name not in self._catalog:
+                self._catalog.append(name)
+        self._rebuild()
+        self.changed.emit()
+
+    def merge_catalog(self, ids: list[str]) -> None:
+        for name in ids:
+            if name and name not in self._catalog:
+                self._catalog.append(name)
+        self._rebuild()
+        self.changed.emit()
+
+    def _add_index(self, index: int) -> None:
+        name = self.combo.itemData(index)
+        if not name or name in self._chosen:
+            self.combo.setCurrentIndex(0)
+            return
+        self._chosen.append(str(name))
+        self._rebuild()
+        self.changed.emit()
+
+    def remove(self, name: str) -> None:
+        self._chosen = [item for item in self._chosen if item != name]
+        self._rebuild()
+        self.changed.emit()
+
+    def _rebuild(self) -> None:
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        self.combo.addItem("选择模型", "")
+        available = [name for name in self._catalog if name not in self._chosen]
+        if available:
+            for name in available:
+                self.combo.addItem(name, name)
+        else:
+            placeholder = "先获取模型列表" if not self._catalog else "已全部选上"
+            self.combo.addItem(placeholder, "")
+            item = self.combo.model().item(1)
+            if item is not None:
+                item.setEnabled(False)
+        self.combo.setCurrentIndex(0)
+        self.combo.blockSignals(False)
+
+        for index in range(self.selected_list.count()):
+            widget = self.selected_list.itemWidget(self.selected_list.item(index))
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.selected_list.clear()
+        if not self._chosen:
+            empty = QListWidgetItem("还没选模型")
+            empty.setFlags(Qt.NoItemFlags)
+            self.selected_list.addItem(empty)
+            return
+        for name in self._chosen:
+            row_item = QListWidgetItem()
+            row_item.setSizeHint(QSize(0, 36))
+            self.selected_list.addItem(row_item)
+            row = QWidget()
+            row.setObjectName("modelRow")
+            inner = QHBoxLayout(row)
+            inner.setContentsMargins(10, 0, 6, 0)
+            inner.setSpacing(8)
+            label = QLabel(name)
+            label.setObjectName("modelChoice")
+            inner.addWidget(label, 1)
+            remove = QPushButton("移除")
+            remove.setObjectName("modelRemove")
+            remove.setCursor(Qt.PointingHandCursor)
+            remove.setFocusPolicy(Qt.NoFocus)
+            remove.clicked.connect(lambda _checked=False, model=name: self.remove(model))
+            inner.addWidget(remove)
+            self.selected_list.setItemWidget(row_item, row)
 
 
 class ProviderDialog(QDialog):
@@ -529,8 +661,8 @@ class ProviderDialog(QDialog):
         self.provider = provider
         self._color = (provider or {}).get("iconColor") or ICON_COLORS[0]
         self.setWindowTitle("编辑供应商" if provider else "添加供应商")
-        self.resize(760, 560)
-        self.setMinimumWidth(680)
+        self.resize(860, 640)
+        self.setMinimumSize(760, 560)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 18)
@@ -632,15 +764,24 @@ class ProviderDialog(QDialog):
         right.addLayout(dots)
         self._pick_color(self._color if self._color in ICON_COLORS else ICON_COLORS[0])
 
-        right.addWidget(_field_label("模型映射"))
-        hint = QLabel("左边是 Cursor 里选的名字，右边是上游模型 ID。不要和 Cursor 内置模型重名。")
-        hint.setObjectName("formHint")
-        hint.setWordWrap(True)
-        right.addWidget(hint)
-        self.models = QPlainTextEdit()
-        self.models.setPlaceholderText("openai-main = gpt-4o")
-        self.models.setPlainText(_models_text((provider or {}).get("models") or []))
-        right.addWidget(self.models, 1)
+        right.addWidget(_field_label("模型"))
+        fetch_row = QHBoxLayout()
+        fetch_row.setSpacing(8)
+        self.fetch_btn = QPushButton("获取模型列表")
+        self.fetch_btn.setObjectName("ghostText")
+        self.fetch_btn.setCursor(Qt.PointingHandCursor)
+        self.fetch_btn.setFocusPolicy(Qt.NoFocus)
+        self.fetch_btn.setFixedHeight(34)
+        self.fetch_btn.clicked.connect(self._fetch_models)
+        fetch_row.addWidget(self.fetch_btn)
+        self.model_status = QLabel("先填地址和 Key，再获取列表，从下拉里选。")
+        self.model_status.setObjectName("modelStatus")
+        self.model_status.setWordWrap(True)
+        fetch_row.addWidget(self.model_status, 1)
+        right.addLayout(fetch_row)
+        self.model_picker = ModelPicker()
+        self.model_picker.set_models(_model_ids((provider or {}).get("models")))
+        right.addWidget(self.model_picker, 1)
 
         columns.addLayout(left, 1)
         columns.addLayout(right, 1)
@@ -660,6 +801,7 @@ class ProviderDialog(QDialog):
         root.addLayout(buttons)
 
         self._payload: dict | None = None
+        self._fetch: ModelFetch | None = None
         self.preset.currentIndexChanged.connect(self._apply_preset)
 
     def _save(self) -> None:
@@ -669,6 +811,69 @@ class ProviderDialog(QDialog):
             QMessageBox.warning(self, "还没填完", str(error))
             return
         self.accept()
+
+    def done(self, code: int) -> None:
+        self._stop_fetch()
+        super().done(code)
+
+    def _stop_fetch(self) -> None:
+        worker = self._fetch
+        if worker is None:
+            return
+        self._fetch = None
+        try:
+            worker.succeeded.disconnect()
+            worker.failed.disconnect()
+        except RuntimeError:
+            pass
+        if worker.isRunning():
+            worker.finished.connect(worker.deleteLater)
+        else:
+            worker.deleteLater()
+
+    def _fetch_models(self) -> None:
+        base = self.base_url.text().strip()
+        if self.provider and self.provider.get("kind") == "demo" and not base:
+            self.model_picker.set_models(["echo"], ["echo"])
+            self._set_model_status("回显站不用拉列表，用 echo 就行。", error=False)
+            return
+        if not base.startswith("http"):
+            self._set_model_status("先填请求地址", error=True)
+            return
+        key = self.api_key.text().strip()
+        if not key and self.provider and self.provider.get("id"):
+            key = _saved_api_key(self.provider["id"])
+        if not key:
+            self._set_model_status("先填 API Key", error=True)
+            return
+        self._stop_fetch()
+        self.fetch_btn.setEnabled(False)
+        self.fetch_btn.setText("获取中…")
+        self._set_model_status("正在获取…", error=False)
+        worker = ModelFetch(base, key, self.auth.currentData(), self.protocol.currentData())
+        worker.succeeded.connect(self._models_loaded)
+        worker.failed.connect(self._models_failed)
+        self._fetch = worker
+        worker.start()
+
+    def _models_loaded(self, ids: list) -> None:
+        self._fetch_idle()
+        self.model_picker.merge_catalog([str(item) for item in ids])
+        self._set_model_status(f"获取到 {len(ids)} 个，从下拉里选。", error=False)
+
+    def _models_failed(self, message: str) -> None:
+        self._fetch_idle()
+        self._set_model_status(message or "获取失败", error=True)
+
+    def _fetch_idle(self) -> None:
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("获取模型列表")
+
+    def _set_model_status(self, text: str, error: bool) -> None:
+        self.model_status.setText(text)
+        self.model_status.setProperty("state", "error" if error else "ok")
+        self.model_status.style().unpolish(self.model_status)
+        self.model_status.style().polish(self.model_status)
 
     def _toggle_key(self) -> None:
         hidden = self.api_key.echoMode() == QLineEdit.Password
@@ -688,7 +893,7 @@ class ProviderDialog(QDialog):
         self.base_url.setText(preset["baseUrl"])
         self.protocol.setCurrentIndex(0 if preset["protocol"] == "openai" else 1)
         self.auth.setCurrentIndex({"bearer": 0, "x-api-key": 1, "both": 2}[preset["authStyle"]])
-        self.models.setPlainText(_models_text(preset["models"]))
+        self.model_picker.set_models(_model_ids(preset["models"]))
         self._pick_color(preset["iconColor"])
 
     def payload(self) -> dict:
@@ -703,7 +908,9 @@ class ProviderDialog(QDialog):
             "authStyle": self.auth.currentData(),
             "baseUrl": self.base_url.text().strip(),
             "apiKey": self.api_key.text().strip(),
-            "models": _parse_models(self.models.toPlainText()),
+            "models": [
+                {"cursorName": name, "upstreamId": name} for name in self.model_picker.chosen_ids()
+            ],
             "notes": self.notes.text().strip(),
             "website": self.website.text().strip(),
             "iconColor": self._color,
@@ -718,7 +925,7 @@ class ProviderDialog(QDialog):
         if not data["baseUrl"]:
             raise ValueError("请求地址不能为空")
         if not data["models"]:
-            raise ValueError("至少写一条模型映射")
+            raise ValueError("先从下拉里选至少一个模型")
         return data
 
 

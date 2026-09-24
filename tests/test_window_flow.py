@@ -1,13 +1,16 @@
+import json
 import os
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton
 
 import witch.window as window_mod
 from witch.app import apply_dark
@@ -222,6 +225,109 @@ class WindowFlowTests(unittest.TestCase):
         self.assertEqual(raw["apiKey"], "sk-demo-saved")
         shown = next(card for card in self.window.board.cards if card.provider_id == "demo-echo")
         self.assertEqual(shown.findChild(QLabel, "providerUrl").text(), "https://relay.example/v1")
+
+    def test_fetch_models_into_dropdown_and_save(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.server.seen_auth = self.headers.get("Authorization")
+                body = json.dumps({"data": [{"id": "alpha"}, {"id": "beta"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):  # noqa: A003
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        target = next(card for card in self.window.board.cards if _card_name(card) == "乙站")
+        holder = {"ok": False, "detail": ""}
+
+        def poll(tries: int = 0) -> None:
+            dialog = self.window.findChild(ProviderDialog)
+            if dialog is None:
+                return
+            try:
+                if tries == 0:
+                    if dialog.findChildren(QPlainTextEdit):
+                        raise AssertionError("model mapping is still a text box")
+                    if dialog.fetch_btn.text() != "获取模型列表":
+                        raise AssertionError(dialog.fetch_btn.text())
+                    if dialog.api_key.text():
+                        raise AssertionError("key field should stay empty")
+                    if dialog.model_picker.chosen_ids() != ["yi-up"]:
+                        raise AssertionError(str(dialog.model_picker.chosen_ids()))
+                    dialog.base_url.setText(f"http://127.0.0.1:{port}/v1")
+                    dialog.fetch_btn.click()
+                elif dialog.model_status.text().startswith("获取到"):
+                    combo = dialog.model_picker.combo
+                    alpha = combo.findData("alpha")
+                    if alpha < 0 or combo.findData("beta") < 0 or combo.findData("yi-up") != -1:
+                        raise AssertionError(f"combo items missing {[combo.itemText(i) for i in range(combo.count())]}")
+                    if server.seen_auth != "Bearer sk-bbbb":
+                        raise AssertionError(server.seen_auth or "")
+                    combo.activated.emit(alpha)
+                    if dialog.model_picker.chosen_ids() != ["yi-up", "alpha"]:
+                        raise AssertionError(str(dialog.model_picker.chosen_ids()))
+                    labels = [label.text() for label in dialog.model_picker.findChildren(QLabel, "modelChoice")]
+                    if labels != ["yi-up", "alpha"]:
+                        raise AssertionError(str(labels))
+                    holder["ok"] = True
+                    next(button for button in dialog.findChildren(QPushButton) if button.text() == "保存").click()
+                    return
+                elif dialog.model_status.property("state") == "error" or tries > 40:
+                    holder["detail"] = dialog.model_status.text()
+                    dialog.reject()
+                    return
+            except Exception as error:  # noqa: BLE001
+                holder["detail"] = str(error)
+                dialog.reject()
+                return
+            QTimer.singleShot(50, lambda: poll(tries + 1))
+
+        try:
+            QTimer.singleShot(30, lambda: poll(0))
+            self.window.edit_provider(target.provider_id)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertTrue(holder["ok"], holder["detail"])
+        raw = next(item for item in read_store()["providers"] if item["id"] == target.provider_id)
+        self.assertEqual(
+            raw["models"],
+            [
+                {"cursorName": "yi-up", "upstreamId": "yi-up"},
+                {"cursorName": "alpha", "upstreamId": "alpha"},
+            ],
+        )
+
+    def test_fetch_failure_keeps_selected_models(self):
+        target = next(card for card in self.window.board.cards if _card_name(card) == "甲站")
+        holder = {"text": "", "ids": []}
+
+        def poll(tries: int = 0) -> None:
+            dialog = self.window.findChild(ProviderDialog)
+            if dialog is None:
+                return
+            if tries == 0:
+                dialog.base_url.setText("http://127.0.0.1:1/v1")
+                dialog.api_key.setText("sk-temp")
+                dialog.fetch_btn.click()
+            elif dialog.model_status.property("state") == "error" or tries > 40:
+                holder["text"] = dialog.model_status.text()
+                holder["ids"] = dialog.model_picker.chosen_ids()
+                dialog.reject()
+                return
+            QTimer.singleShot(50, lambda: poll(tries + 1))
+
+        QTimer.singleShot(30, lambda: poll(0))
+        self.window.edit_provider(target.provider_id)
+        self.assertEqual(holder["text"], "连不上这个地址")
+        self.assertEqual(holder["ids"], ["jia-up"])
 
 
 if __name__ == "__main__":

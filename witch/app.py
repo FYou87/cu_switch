@@ -28,7 +28,23 @@ QLabel#appTitle { font-size: 16px; font-weight: 700; color: #111827; background:
 QLabel#dialogTitle { font-size: 18px; font-weight: 700; color: #111827; }
 QLabel#muted { color: #6b7280; background: transparent; }
 QLabel#formLabel { color: #6b7280; font-size: 12px; background: transparent; }
-QLabel#formHint { color: #6b7280; font-size: 12px; background: transparent; }
+QLabel#formHint, QLabel#modelStatus { color: #6b7280; font-size: 12px; background: transparent; }
+QLabel#modelStatus[state="error"] { color: #dc2626; }
+QListWidget#selectedModels {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 4px;
+}
+QListWidget#selectedModels::item { border: none; }
+QWidget#modelRow { background: transparent; }
+QPushButton#modelRemove {
+  background: transparent;
+  border: none;
+  color: #6b7280;
+  padding: 4px 8px;
+}
+QPushButton#modelRemove:hover { color: #dc2626; }
 QLabel#grip { color: #9ca3af; font-size: 16px; background: transparent; }
 QLabel#providerName { font-size: 14px; font-weight: 650; color: #111827; background: transparent; }
 QLabel#providerUrl { font-size: 12px; background: transparent; }

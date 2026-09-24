@@ -1,3 +1,3 @@
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 GATEWAY_PORT = 43187
 GATEWAY_HOST = "127.0.0.1"

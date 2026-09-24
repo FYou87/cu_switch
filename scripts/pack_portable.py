@@ -192,7 +192,8 @@ def write_windows_launchers(root: Path) -> None:
         "顶栏 API：不用登录 Cursor。Agent 和 IDE 都走当前中转站，Cursor 会退出后重新打开。\r\n"
         "顶栏 登录：恢复原版 Cursor，用账号登录。\r\n"
         "Cursor 装在默认位置即可。若提示没有权限，右键 Witch，用管理员身份运行。\r\n"
-        "中转站的地址和 Key 写在供应商卡片里。顶栏切到 API 后，Cursor 会走当前这张卡片。\r\n",
+        "中转站的地址和 Key 写在供应商卡片里。编辑时点「获取模型列表」，再从下拉里选模型。\r\n"
+        "顶栏切到 API 后，Cursor 会走当前这张卡片。\r\n",
         encoding="utf-8",
     )
 
@@ -238,7 +239,8 @@ def write_macos_app(root: Path, python_dir: Path) -> None:
         "不需要安装 Python。\n"
         "顶栏 API：不用登录 Cursor。Agent 和 IDE 都走当前中转站，Cursor 会退出后重新打开。\n"
         "顶栏 登录：恢复原版 Cursor，用账号登录。\n"
-        "中转站的地址和 Key 写在供应商卡片里。顶栏切到 API 后，Cursor 会走当前这张卡片。\n",
+        "中转站的地址和 Key 写在供应商卡片里。编辑时点「获取模型列表」，再从下拉里选模型。\n"
+        "顶栏切到 API 后，Cursor 会走当前这张卡片。\n",
         encoding="utf-8",
     )
 
