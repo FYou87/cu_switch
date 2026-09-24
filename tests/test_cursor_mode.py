@@ -6,10 +6,15 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from witch.cursor_mode import (
     CursorModeError,
+    _parse_windows_process_json,
+    _windows_install_candidates,
+    _windows_main_pids,
     apply_cursor_mode,
+    find_app_root,
     installed_mode,
     sync_api_profile,
     transform_source,
@@ -175,6 +180,76 @@ class CursorModeTests(unittest.TestCase):
         self.assertTrue(payload["cppEnabled"])
         self.assertEqual(payload["aiSettings"]["userAddedModels"], ["kept-model", "grok-4.7"])
         self.assertEqual(payload["localProviderModelIds"], ["grok-4.7"])
+
+
+class WindowsCursorTests(unittest.TestCase):
+    def test_finds_default_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "Local"
+            app = local / "Programs" / "cursor" / "resources" / "app"
+            app.mkdir(parents=True)
+            (app / "product.json").write_text("{}", encoding="utf-8")
+            binary = local / "Programs" / "cursor" / "Cursor.exe"
+            binary.write_text("", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": str(local), "ProgramFiles": str(Path(tmp) / "missing")},
+                clear=False,
+            ):
+                os.environ.pop("WITCH_CURSOR_ROOT", None)
+                os.environ.pop("ProgramW6432", None)
+                with mock.patch("witch.cursor_mode.sys.platform", "win32"), mock.patch(
+                    "witch.cursor_mode.Path.home", return_value=Path(tmp) / "home"
+                ):
+                    self.assertEqual(find_app_root(), app)
+                    from witch.cursor_mode import cursor_binary
+
+                    self.assertEqual(cursor_binary(app), binary)
+
+    def test_candidates_include_program_files_and_capitalized_name(self):
+        with mock.patch.dict(
+            os.environ,
+            {"LOCALAPPDATA": r"C:\Users\a\AppData\Local", "ProgramFiles": r"C:\Program Files"},
+            clear=False,
+        ):
+            os.environ.pop("ProgramW6432", None)
+            with mock.patch("witch.cursor_mode.Path.home", return_value=Path(r"C:\Users\a")):
+                found = [str(path).replace("\\", "/") for path in _windows_install_candidates()]
+        folded = [item.lower() for item in found]
+        self.assertIn("c:/users/a/appdata/local/programs/cursor/resources/app", folded)
+        self.assertTrue(any(item.lower().endswith("/program files/cursor/resources/app") for item in found))
+        self.assertFalse(any("/programs/cursor/resources/app" in item.lower() and "program files" in item.lower() for item in found))
+
+    def test_process_list_keeps_only_the_main_window(self):
+        binary = Path(r"C:\Users\a\AppData\Local\Programs\cursor\Cursor.exe")
+        raw = json.dumps(
+            [
+                {"ProcessId": 10, "ExecutablePath": str(binary), "CommandLine": f'"{binary}"'},
+                {
+                    "ProcessId": 11,
+                    "ExecutablePath": str(binary).upper(),
+                    "CommandLine": f'"{binary}" --type=renderer',
+                },
+                {
+                    "ProcessId": 12,
+                    "ExecutablePath": str(binary),
+                    "CommandLine": f'"{binary}" resources\\app\\out\\cli.js',
+                },
+                {
+                    "ProcessId": 13,
+                    "ExecutablePath": r"C:\Other\Cursor.exe",
+                    "CommandLine": r'"C:\Other\Cursor.exe"',
+                },
+            ]
+        )
+        rows = _parse_windows_process_json(raw)
+        self.assertEqual(_windows_main_pids(binary, rows), [10])
+
+    def test_single_process_json_object(self):
+        binary = Path(r"C:\Users\a\AppData\Local\Programs\cursor\Cursor.exe")
+        raw = json.dumps({"ProcessId": "42", "ExecutablePath": str(binary), "CommandLine": f'"{binary}"'})
+        self.assertEqual(_windows_main_pids(binary, _parse_windows_process_json(raw)), [42])
+        self.assertEqual(_parse_windows_process_json(""), [])
 
 
 if __name__ == "__main__":

@@ -87,12 +87,7 @@ def find_app_root() -> Path:
         return path
     candidates: list[Path] = []
     if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            candidates.append(Path(local) / "Programs" / "cursor" / "resources" / "app")
-        program = os.environ.get("ProgramFiles")
-        if program:
-            candidates.append(Path(program) / "cursor" / "resources" / "app")
+        candidates.extend(_windows_install_candidates())
     elif sys.platform == "darwin":
         candidates.append(Path("/Applications/Cursor.app/Contents/Resources/app"))
         candidates.append(Path.home() / "Applications" / "Cursor.app" / "Contents" / "Resources" / "app")
@@ -108,6 +103,28 @@ def find_app_root() -> Path:
         if (candidate / "product.json").is_file():
             return candidate
     raise CursorModeError("这台机器上没找到 Cursor。")
+
+
+def _windows_install_candidates() -> list[Path]:
+    found: list[Path] = []
+    local = os.environ.get("LOCALAPPDATA")
+    local_roots = [Path(local)] if local else [Path.home() / "AppData" / "Local"]
+    for root in local_roots:
+        found.append(root / "Programs" / "cursor" / "resources" / "app")
+    for key in ("ProgramFiles", "ProgramW6432"):
+        value = os.environ.get(key)
+        if not value:
+            continue
+        found.append(Path(value) / "cursor" / "resources" / "app")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in found:
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
 
 
 def cursor_user_data() -> Path:
@@ -511,7 +528,49 @@ def _product_version(app_root: Path) -> str:
     return str(product.get("version") or "")
 
 
+def _parse_windows_process_json(raw: str) -> list[tuple[int, str, str]]:
+    text = raw.strip().lstrip("\ufeff")
+    if not text:
+        return []
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    rows = loaded if isinstance(loaded, list) else [loaded]
+    parsed: list[tuple[int, str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        pid = row.get("ProcessId")
+        if isinstance(pid, str) and pid.isdigit():
+            pid = int(pid)
+        if not isinstance(pid, int):
+            continue
+        parsed.append((pid, str(row.get("ExecutablePath") or ""), str(row.get("CommandLine") or "")))
+    return parsed
+
+
+def _win_path(value: str) -> str:
+    return value.replace("/", "\\").rstrip("\\").lower()
+
+
+def _windows_main_pids(binary: Path, rows: list[tuple[int, str, str]]) -> list[int]:
+    target = _win_path(str(binary))
+    found: list[int] = []
+    for pid, executable, command in rows:
+        exe = _win_path(executable)
+        folded = command.replace("/", "\\").lower()
+        if exe != target and target not in folded:
+            continue
+        if "--type=" in folded or "cursor-server" in folded or "cli.js" in folded:
+            continue
+        found.append(pid)
+    return found
+
+
 def _cursor_pids(binary: Path) -> list[int]:
+    if sys.platform == "win32":
+        return _windows_main_pids(binary, _windows_processes())
     target = str(binary)
     found: list[int] = []
     proc = Path("/proc")
@@ -551,25 +610,49 @@ def _cursor_pids(binary: Path) -> list[int]:
     return found
 
 
+def _windows_processes() -> list[tuple[int, str, str]]:
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Get-CimInstance Win32_Process -Filter \"Name = 'Cursor.exe'\" | "
+        "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress",
+    ]
+    try:
+        listing = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8")
+    except OSError:
+        return []
+    return _parse_windows_process_json(listing.stdout)
+
+
+def _stop_pid(pid: int, force: bool) -> None:
+    if sys.platform == "win32":
+        command = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            command.append("/F")
+        subprocess.run(command, check=False, capture_output=True)
+        return
+    try:
+        os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+    except OSError:
+        return
+
+
 def _quit(binary: Path) -> None:
     pids = _cursor_pids(binary)
     if not pids:
         return
     for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            continue
+        _stop_pid(pid, force=False)
     deadline = time.time() + 8
     while time.time() < deadline:
         if not _cursor_pids(binary):
             return
         time.sleep(0.2)
     for pid in _cursor_pids(binary):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            continue
+        _stop_pid(pid, force=True)
     time.sleep(0.3)
     if _cursor_pids(binary):
         raise CursorModeError("Cursor 还没退出，先手动关掉再切。")
@@ -586,24 +669,38 @@ def _launch(binary: Path, mode: str) -> None:
         env.pop("CURSOR_LOCAL_AGENT_BASE_URL", None)
         env.pop("CURSOR_LOCAL_AGENT_API_KEY", None)
         args = [str(binary)]
-    subprocess.Popen(
-        args,
-        env=env,
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    kwargs: dict = {
+        "env": env,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(args, **kwargs)
 
 
 def _commit_writes(updates: dict[Path, bytes]) -> None:
     denied: list[tuple[Path, bytes]] = []
+    locked = False
     for path, data in updates.items():
         try:
             _atomic_write(path, data)
-        except PermissionError:
-            denied.append((path, data))
+        except OSError as error:
+            if getattr(error, "winerror", None) == 32:
+                locked = True
+                continue
+            if isinstance(error, PermissionError):
+                denied.append((path, data))
+                continue
+            raise
+    if locked:
+        raise CursorModeError("Cursor 还开着，安装文件被占用。先退出 Cursor 再切。")
     if not denied:
         return
+    if sys.platform == "win32":
+        raise CursorModeError("没有权限修改 Cursor 的安装目录。右键 Witch，用管理员身份运行。")
     staging = Path(tempfile.mkdtemp(prefix="witch-cursor-"))
     manifest = []
     for index, (path, data) in enumerate(denied):

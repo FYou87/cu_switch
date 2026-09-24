@@ -187,8 +187,10 @@ def write_windows_launchers(root: Path) -> None:
     (root / "使用说明.txt").write_text(
         "解压整个文件夹，双击 Witch.exe（或 Witch.vbs）。不用装 Python。\r\n"
         "Windows 10/11。SmartScreen 若拦截，选“仍要运行”。\r\n"
-        "Cursor：Settings → Models，打开 OpenAI API Key 和 Override OpenAI Base URL，\r\n"
-        "地址和 Key 在 Witch 齿轮里复制。\r\n",
+        "顶栏 API：不用登录 Cursor。Agent 和 IDE 都走当前中转站，Cursor 会退出后重新打开。\r\n"
+        "顶栏 登录：恢复原版 Cursor，用账号登录。\r\n"
+        "Cursor 装在默认位置即可。若提示没有权限，右键 Witch，用管理员身份运行。\r\n"
+        "齿轮里的地址和 Key 仍可手动填进 Settings → Models 的 Override OpenAI Base URL。\r\n",
         encoding="utf-8",
     )
 
