@@ -61,6 +61,8 @@ def _sanitize(store: dict[str, Any]) -> dict[str, Any]:
         "cursorSetup",
         {"copiedBaseUrl": False, "copiedKey": False, "probed": False},
     )
+    if store.get("cursorMode") not in {"api", "login"}:
+        store["cursorMode"] = "login"
     ids = {item.get("id") for item in store["providers"]}
     if store.get("activeProviderId") not in ids:
         store["activeProviderId"] = store["providers"][0]["id"] if store["providers"] else None
@@ -107,6 +109,7 @@ def to_public(store: dict[str, Any]) -> dict[str, Any]:
         "logs": store.get("logs", []),
         "cursorSetup": store.get("cursorSetup")
         or {"copiedBaseUrl": False, "copiedKey": False, "probed": False},
+        "cursorMode": store.get("cursorMode") if store.get("cursorMode") in {"api", "login"} else "login",
     }
 
 

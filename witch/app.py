@@ -96,13 +96,20 @@ QPushButton#iconBtn, QPushButton#toolBtn {
 }
 QPushButton#iconBtn { padding: 0; }
 QPushButton#iconBtn:hover, QPushButton#toolBtn:hover { background: #f3f4f6; }
-QPushButton#appSwitch {
+QPushButton#modeBtn {
   background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   padding: 6px 12px;
-  font-weight: 600;
+  font-weight: 650;
+  color: #111827;
 }
+QPushButton#modeBtn[selected="true"] {
+  background: #2563eb;
+  border: none;
+  color: #ffffff;
+}
+QPushButton#modeBtn[selected="true"]:hover { background: #1d4ed8; }
 QPushButton#addBtn {
   background: #2563eb;
   border: none;
@@ -234,6 +241,17 @@ class WitchApp:
         show = QAction("打开主界面", self.qt)
         show.triggered.connect(self.window.showNormal)
         menu.addAction(show)
+        mode = self.window.mode_switch.mode()
+        api_mode = QAction("API 模式", self.qt)
+        api_mode.setCheckable(True)
+        api_mode.setChecked(mode == "api")
+        api_mode.triggered.connect(lambda: self.window.choose_mode("api"))
+        login_mode = QAction("登录模式", self.qt)
+        login_mode.setCheckable(True)
+        login_mode.setChecked(mode == "login")
+        login_mode.triggered.connect(lambda: self.window.choose_mode("login"))
+        menu.addAction(api_mode)
+        menu.addAction(login_mode)
         menu.addSeparator()
         state = to_public(read_store())
         for provider in state["providers"]:

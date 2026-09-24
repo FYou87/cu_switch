@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -599,6 +598,41 @@ class ImportDialog(QDialog):
         return self._parsed
 
 
+class ModeSwitch(QWidget):
+    chosen = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self._mode = "login"
+        self._buttons: dict[str, QPushButton] = {}
+        for mode, label, tip in (
+            ("api", "API", "API 模式：不登录。Agent 和 IDE 都走当前中转站。"),
+            ("login", "登录", "登录模式：恢复原版 Cursor，用账号登录。"),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("modeBtn")
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _checked=False, value=mode: self.chosen.emit(value))
+            layout.addWidget(button)
+            self._buttons[mode] = button
+        self.set_mode("login")
+
+    def mode(self) -> str:
+        return self._mode
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode if mode in self._buttons else "login"
+        for value, button in self._buttons.items():
+            button.setProperty("selected", "true" if value == self._mode else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent: MainWindow):
         super().__init__(parent)
@@ -611,6 +645,10 @@ class SettingsDialog(QDialog):
         title = QLabel("设置")
         title.setObjectName("dialogTitle")
         layout.addWidget(title)
+        hint = QLabel("顶栏的 API / 登录 会改 Cursor。API 模式不用登录，Agent 和 IDE 都走当前中转站。")
+        hint.setObjectName("formHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         layout.addWidget(_field_label("Cursor Override Base URL"))
         url_row = QHBoxLayout()
@@ -671,6 +709,7 @@ class SettingsDialog(QDialog):
         rotate_token()
         self.reload()
         self.main.refresh()
+        self.main._refresh_api_profile()
 
 
 class MainWindow(QWidget):
@@ -729,18 +768,12 @@ class MainWindow(QWidget):
         self.host_chip.setToolTip("点击复制 Base URL，填进 Cursor 的 Override OpenAI Base URL")
         self.host_chip.clicked.connect(self.copy_url)
         header.addWidget(self.host_chip)
-        header.addStretch()
 
-        self.app_btn = QPushButton("Cursor")
-        self.app_btn.setObjectName("appSwitch")
-        self.app_btn.setCursor(Qt.PointingHandCursor)
-        self.app_btn.setFocusPolicy(Qt.NoFocus)
-        app_menu = QMenu(self.app_btn)
-        current = app_menu.addAction("Cursor")
-        current.setCheckable(True)
-        current.setChecked(True)
-        self.app_btn.setMenu(app_menu)
-        header.addWidget(self.app_btn)
+        self.mode_switch = ModeSwitch()
+        self.mode_switch.chosen.connect(self.choose_mode)
+        header.addWidget(self.mode_switch)
+        self._sync_mode_switch()
+        header.addStretch()
 
         for text, slot, tip in (
             ("导入", self.import_text, "粘贴中转站配置"),
@@ -840,6 +873,10 @@ class MainWindow(QWidget):
     def _toggle_proxy(self, on: bool) -> None:
         from witch.gateway import start_gateway, stop_gateway
 
+        if not on and read_store().get("cursorMode") == "api":
+            self.set_gateway_status(True, gateway_base_url())
+            QMessageBox.information(self, "本地代理", "API 模式要靠本地代理把请求送到当前中转站，先别关。")
+            return
         if on:
             try:
                 start_gateway()
@@ -886,9 +923,53 @@ class MainWindow(QWidget):
         state = to_public(read_store())
         return next((item for item in state["providers"] if item["id"] == provider_id), None)
 
+    def _sync_mode_switch(self) -> None:
+        from witch.cursor_mode import CursorModeError, installed_mode
+
+        try:
+            mode = installed_mode()
+        except CursorModeError:
+            mode = read_store().get("cursorMode") or "login"
+        self.mode_switch.set_mode(mode)
+
+    def choose_mode(self, mode: str) -> None:
+        if mode == self.mode_switch.mode():
+            return
+        from witch.cursor_mode import CursorModeError, apply_cursor_mode, cursor_binary, cursor_is_running, find_app_root
+
+        try:
+            binary = cursor_binary(find_app_root())
+        except CursorModeError as error:
+            QMessageBox.warning(self, "切换模式", str(error))
+            return
+        if binary is not None and cursor_is_running(binary):
+            answer = QMessageBox.question(self, "切换模式", "要先退出 Cursor，再按这个模式重新打开。继续？")
+            if answer != QMessageBox.Yes:
+                return
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result = apply_cursor_mode(mode, relaunch=True, quit_running=True)
+        except CursorModeError as error:
+            QMessageBox.warning(self, "切换模式", str(error))
+            return
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        self.mode_switch.set_mode(result.mode)
+        self.refresh()
+        QMessageBox.information(self, "切换模式", result.message)
+
+    def _refresh_api_profile(self) -> None:
+        from witch.cursor_mode import CursorModeError, refresh_api_profile
+
+        try:
+            refresh_api_profile()
+        except CursorModeError as error:
+            QMessageBox.warning(self, "API 模式", str(error))
+
     def enable_provider(self, provider_id: str) -> None:
         activate_provider(provider_id)
         self.refresh()
+        self._refresh_api_profile()
 
     def add_provider(self) -> None:
         dialog = ProviderDialog(self)

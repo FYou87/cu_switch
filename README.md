@@ -1,6 +1,6 @@
 # Witch
 
-给 Cursor 用的中转站切换器。主界面按 CC Switch 的供应商页排：顶栏（设置、本地代理开关、Cursor）、供应商卡片、启用 / 使用中，以及编辑、复制、测速、删除。托盘里也能直接切。
+给 Cursor 用的中转站切换器。主界面按 CC Switch 的供应商页排：顶栏（设置、本地代理、API / 登录）、供应商卡片、启用 / 使用中，以及编辑、复制、测速、删除。托盘里也能直接切。
 
 ## 免安装（Windows / macOS）
 
@@ -34,7 +34,14 @@
 
 ## Cursor
 
-Settings → Models：打开 OpenAI API Key 和 Override OpenAI Base URL。地址和 Key 在 Witch 齿轮里复制。之后只在 Witch 点启用或托盘切换。
+顶栏在 **API** 和 **登录** 之间切换。
+
+- **API**：打开 Cursor 自带的本地 API。Agent 和 IDE 都走 Witch 里当前启用的中转站，不用登录 Cursor 账号。切换时会退出并重新打开 Cursor。
+- **登录**：把 Cursor 程序恢复成原版，用账号登录。
+
+Witch 会先备份被改过的 Cursor 文件，再写回去。Cursor 更新之后如果 API 模式掉了，再点一次 API。
+
+齿轮里的地址和 Key 仍然可以手动填进 Settings → Models 的 Override OpenAI Base URL。日常切中转站，在卡片或托盘里点启用就行。
 
 ## 数据
 
