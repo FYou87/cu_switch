@@ -18,6 +18,8 @@ CPU_TYPE_X86_64 = 0x01000007
 CPU_TYPE_ARM64 = 0x0100000C
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from witch import __version__ as VERSION
 CACHE = ROOT / "build" / "portable-cache"
 OUT = ROOT / "dist" / "portable"
 PBS_TAG = "20260901"
@@ -204,15 +206,15 @@ def write_macos_app(root: Path, python_dir: Path) -> None:
     shutil.move(str(python_dir), resources / "python")
     (resources / "portable").write_text("witch\n", encoding="utf-8")
     (app / "Contents" / "Info.plist").write_text(
-        """<?xml version="1.0" encoding="UTF-8"?>
+        f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key><string>Witch</string>
   <key>CFBundleDisplayName</key><string>Witch</string>
   <key>CFBundleIdentifier</key><string>local.witch.switch</string>
-  <key>CFBundleVersion</key><string>0.3.1</string>
-  <key>CFBundleShortVersionString</key><string>0.3.1</string>
+  <key>CFBundleVersion</key><string>{VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>{VERSION}</string>
   <key>CFBundleExecutable</key><string>Witch</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
@@ -234,8 +236,9 @@ def write_macos_app(root: Path, python_dir: Path) -> None:
     (root / "使用说明.txt").write_text(
         "解压后双击 Witch.app。第一次若提示“无法打开”，按住 Control 点图标选打开。\n"
         "不需要安装 Python。\n"
-        "Cursor：Settings → Models，打开 OpenAI API Key 和 Override OpenAI Base URL，\n"
-        "地址和 Key 在 Witch 齿轮里复制。\n",
+        "顶栏 API：不用登录 Cursor。Agent 和 IDE 都走当前中转站，Cursor 会退出后重新打开。\n"
+        "顶栏 登录：恢复原版 Cursor，用账号登录。\n"
+        "齿轮里的地址和 Key 仍可手动填进 Settings → Models 的 Override OpenAI Base URL。\n",
         encoding="utf-8",
     )
 
@@ -284,14 +287,14 @@ def build_one(name: str, spec: dict) -> Path:
         shutil.move(str(python_dir), final / "python")
         shutil.rmtree(work / "_py")
         write_windows_launchers(final)
-        zip_path = OUT / f"Witch-0.3.1-{name}.zip"
+        zip_path = OUT / f"Witch-{VERSION}-{name}.zip"
         zip_dir(final, zip_path)
         return zip_path
     final = work / "Witch"
     final.mkdir()
     write_macos_app(final, python_dir)
     shutil.rmtree(work / "_py", ignore_errors=True)
-    zip_path = OUT / f"Witch-0.3.1-{name}.zip"
+    zip_path = OUT / f"Witch-{VERSION}-{name}.zip"
     zip_dir(final, zip_path)
     return zip_path
 
